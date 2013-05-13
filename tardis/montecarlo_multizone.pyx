@@ -9,6 +9,7 @@ import logging
 import time
 
 from astropy import constants
+from cython.view cimport array as cvarray
 
 cimport numpy as np
 np.import_array()
@@ -109,6 +110,23 @@ cdef class StorageModel:
     cdef float_type_t sigma_thomson
     cdef float_type_t inverse_sigma_thomson
 
+    cdef np.ndarray kappa_bf_gray
+    cdef float_type_t[:] kappa_bf_gray_view
+
+    cdef np.ndarray kappa_bf_nu
+    cdef float_type_t[:,:] kappa_bf_nu_view
+
+
+    cdef np.ndarray bf_nu_bin
+    cdef float_type_t[:] bf_nu_bin_view
+    cdef int_type_t bf_nu_bin_size
+
+
+    cdef float_type_t* t_electron
+    cdef np.ndarray t_electron_a
+
+
+
     def __init__(self, model):
 
         rk_seed(250819801106, &mt_state)
@@ -152,7 +170,7 @@ cdef class StorageModel:
         self.inverse_electron_density_a = inverse_electron_density
         self.inverse_electron_density = <float_type_t*> self.inverse_electron_density_a.data
         #Line lists
-        cdef np.ndarray[float_type_t, ndim=1] line_list_nu = model.line_list_nu.values
+        cdef np.ndarray[float_type_t, ndim=1] line_list_nu = model.line_list_nu
         self.line_list_nu_a = line_list_nu
         self.line_list_nu = <float_type_t*> self.line_list_nu_a.data
         #
@@ -168,6 +186,46 @@ cdef class StorageModel:
         self.line_lists_j_blues_a = line_lists_j_blues
         self.line_lists_j_blues = <float_type_t*> self.line_lists_j_blues_a.data
         self.line_lists_j_blues_nd = self.line_lists_j_blues_a.shape[1]
+
+
+        #The bound-free kappas.
+        #At the moment only the gray operatics are passed to the cython module
+        cdef np.ndarray[float_type_t, ndim = 1] kappa_bf_gray = model.kappa_bf_gray
+        cdef float_type_t[:] kappa_bf_gray_view = kappa_bf_gray
+
+        self.kappa_bf_gray = kappa_bf_gray
+        self.kappa_bf_gray_view = kappa_bf_gray_view
+
+        cdef np.ndarray[float_type_t,ndim = 2] kappa_bf_nu = model.kappa_bf_nu
+        cdef float_type_t[:,:] kappa_bf_nu_view = kappa_bf_nu
+
+        self.kappa_bf_nu = kappa_bf_nu
+        self.kappa_bf_nu_view = kappa_bf_nu_view
+
+
+        #TODO chagne this to a pointer
+        cdef np.ndarray[float_type_t, ndim = 1] bf_nu_bin  = model.kappa_bf_nu_bins.astype('f8')
+        cdef float_type_t[:] bf_nu_bin_view = bf_nu_bin
+        self.bf_nu_bin = bf_nu_bin
+        self.bf_nu_bin_view = bf_nu_bin_view
+
+        # cdef float_type_t [:,:] bf_nu_bin_view = self.bf_nu_bin_a
+        # self.bf_nu_bin_view = bf_nu_bin_view
+
+        self.bf_nu_bin_size = len(self.bf_nu_bin)
+        ###Int the array
+
+
+
+        size_of_bf_nu_bin = self.no_of_shells * self.bf_nu_bin_size
+
+
+
+
+        #electron temperature
+        cdef np.ndarray[float_type_t, ndim = 1] t_electron = model.t_electron
+        self.t_electron_a = t_electron
+        self.t_electron = <float_type_t*> self.t_electron_a.data
 
         #
         self.line_interaction_id = model.line_interaction_id
@@ -249,10 +307,70 @@ logger = logging.getLogger(__name__)
 cdef float_type_t miss_distance = 1e99
 cdef float_type_t c = constants.c.cgs.value # cm/s
 cdef float_type_t inverse_c = 1 / c
+cdef float_type_t h_planck = constants.h.cgs.value
+cdef float_type_t boltzmann = constants.k_B.cgs.value
+
+
 #DEBUG STATEMENT TAKE OUT
+#cdef float_type_t sigma_thomson = 6.652486e-25
+cdef float_type_t sigma_thomson = 6.652486e-125
+cdef float_type_t inverse_sigma_thomson = 1 / sigma_thomson
 
 
+cdef rand_nu_planck(float_type_t t_electron):
+    """
+    This function draws a random nu corresponding to the temperature. Using the Neumann rejection sampling.
+    :param t_electron: the electron temperature of the plasma
+    :return: Random nu Boltzmann distributed
+    """
+    cdef float_type_t c1 = 2. * h_planck / (c**2)
+    cdef float_type_t c2 = h_planck / boltzmann
+    cdef float_type_t nuPeak = 5.8789254e10 * t_electron
+    cdef float_type_t  bPeak = ((c1 * nuPeak**3)/(np.exp(c2*(nuPeak/t_electron)) - 1 ))
+    cdef float_type_t nuRand, bRand
+    cdef float_type_t nuStart, nuEnd, nuInterval
+    #tmp definition only for debug. Take this values from the config
+    nuStart = 1.4989623e+14
+    nuEnd = 5.9958492e+15
+    ###
+    nuInterval = nuEnd - nuStart
+    while True:
+        nuRand = rk_double(&mt_state) * nuInterval + nuStart
+        bRand = bPeak * rk_double(&mt_state)
+        bFromNu = ((c1 * nuRand**3)/(np.exp(c2*(nuRand/t_electron)) - 1 ))
+        if bRand < bFromNu:
+            break
+    return nuRand
 
+
+cdef float_type_t getGrayKappaBFbyNu(float_type_t nu, float_type_t[:] nu_bins, float_type_t[:,:] kappa_bf_nu_view,int_type_t* current_shell_id):
+    cdef float_type_t kappa_bf_nu = 0
+    cdef int_type_t i
+    for i in range(len(nu_bins)-1):
+        #print(nu_bins[i],'<',nu,'<',nu_bins[i+1])
+        if ((nu > nu_bins[i]) and (nu <= nu_bins[i+1])):
+            kappa_bf_nu =  kappa_bf_nu_view[current_shell_id[0],i]
+            break
+    #kappa_bf_nu = 0.
+    return kappa_bf_nu
+
+cdef int_type_t getNextLineId(float_type_t*nu, float_type_t nu_insert, int_type_t imin,
+                              int_type_t imax):
+    # print('startNextLineId')
+    if nu_insert > nu[imin]:
+        # print("nu[imin]= %g" %nu[imin])
+        # print("nu_insert %g" %nu_insert)
+        return imin
+    elif nu_insert < nu[imax]:
+        # print("nu[imax]= %g" %nu[imax])
+        # print("nu_insert %g" %nu_insert)
+        return imax +1
+    else:
+        # print('start bin search')
+        # print("nu[imax]= %g" %nu[imax])
+        # print("nu[imin]= %g" %nu[imin])
+        # print("nu_insert %g" %nu_insert)
+        return binary_search(nu,nu_insert,imin,imax)
 
 cdef int_type_t binary_search(float_type_t*nu, float_type_t nu_insert, int_type_t imin,
                               int_type_t imax):
@@ -415,20 +533,22 @@ cdef float_type_t compute_distance2line(float_type_t r, float_type_t mu,
     doppler_factor = (1. - (mu * r * inverse_t_exp * inverse_c))
     comov_nu = nu * doppler_factor
 
-    if comov_nu < nu_line:
-        #TODO raise exception
-        print "WARNING comoving nu less than nu_line shouldn't happen:"
-        print "comov_nu = ", comov_nu
-        print "nu_line", nu_line
-        print "(comov_nu - nu_line) nu_lines", (comov_nu - nu_line) / nu_line
-        print "last_line", last_line
-        print "next_line", next_line
-        print "r", r
-        print "mu", mu
-        print "nu", nu
-        print "doppler_factor", doppler_factor
-        print "cur_zone_id", cur_zone_id
-        #raise Exception('wrong')
+    #check if the comov_nu is smaller then nu_line
+    if (comov_nu < nu_line):
+            print("-->WARNING comoving nu less than nu_line shouldn't happen:")
+            print "WARNING comoving nu less than nu_line shouldn't happen:"
+            print "comov_nu = ", comov_nu
+            print "nu_line", nu_line
+            print "(comov_nu - nu_line) nu_lines", (comov_nu - nu_line) / nu_line
+            print "last_line", last_line
+            print "next_line", next_line
+            print "r", r
+            print "mu", mu
+            print "nu", nu
+            print "doppler_factor", doppler_factor
+            print "cur_zone_id", cur_zone_id
+            return miss_distance
+
 
     return ((comov_nu - nu_line) / nu) * c * t_exp
 
@@ -436,10 +556,36 @@ cdef float_type_t compute_distance2electron(float_type_t r, float_type_t mu, flo
                                             float_type_t inverse_ne):
     return tau_event * inverse_ne # * inverse_sigma_thomson folded into inverse_ne
 
+#This is the new distance2continum function. The aim of it is to compute the distance to the next continum event which
+# is the sum of electron, bound-free and, free-free opacities.
+
+cdef float_type_t compute_distance2continum(float_type_t tau_event,
+                                            float_type_t nu,
+                                            float_type_t[:,:] kappa_bf_nu_view,
+                                            float_type_t[:] nu_bins_view,
+                                            float_type_t ne,
+                                            float_type_t sigma_thomson,
+                                            int_type_t* current_shell_id):
+
+    cdef float_type_t kappa_cont = 0
+    cdef float_type_t kappa_bf_nu = 0
+    cdef float_type_t kappa_ff = 0
+    cdef float_type_t kappa_th = ne * sigma_thomson
+    kappa_bf_nu = getGrayKappaBFbyNu(nu,nu_bins_view,kappa_bf_nu_view,current_shell_id)
+    kappa_cont = kappa_bf_nu + kappa_ff + kappa_th
+    # print(kappa_cont)
+    # print(kappa_bf_nu)
+    # print(kappa_th)
+    return tau_event/kappa_cont
+
+
+
+
+
 cdef inline float_type_t get_r_sobolev(float_type_t r, float_type_t mu, float_type_t d_line):
     return sqrt(r ** 2 + d_line ** 2 + 2 * r * d_line * mu)
 
-def montecarlo_radial1d(model, int_type_t virtual_packet_flag=0):
+def montecarlo_radial1d(model, int_type_t virtual_packet_flag=0,int_type_t enable_bf = 0):
     """
     Parameters
     ---------
@@ -500,6 +646,7 @@ def montecarlo_radial1d(model, int_type_t virtual_packet_flag=0):
     cdef int_type_t reabsorbed = 0
     cdef int_type_t recently_crossed_boundary = 0
     cdef int i = 0
+    cdef int_type_t  enable_bf_i = enable_bf
 
     for i in range(storage.no_of_packets):
         if i % (storage.no_of_packets / 5) == 0:
@@ -521,7 +668,24 @@ def montecarlo_radial1d(model, int_type_t virtual_packet_flag=0):
         current_energy = current_energy / (1 - (current_mu * current_r * storage.inverse_time_explosion * inverse_c))
 
         #linelists
-        current_line_id = binary_search(storage.line_list_nu, comov_current_nu, 0, storage.no_of_lines)
+        current_line_id = getNextLineId(storage.line_list_nu, comov_current_nu, 0, storage.no_of_lines -1)
+
+        #if comov_current_nu > storage.line_list_nu[0]:
+        #    current_line_id = 0
+        #    last_line = 0
+        #elif comov_current_nu > storage.line_list_nu[storage.no_of_lines -1]:
+        #    current_line_id = binary_search(storage.line_list_nu, comov_current_nu, 0, storage.no_of_lines)
+        #    last_line = 0
+        #else:
+        #    #setting flag that the packet is off the red end of the line list
+        #    last_line =1
+        ###DEBUG####
+        # print("current_nu = %g" %current_nu)
+        # print("current_line_id = %d"%current_line_id)
+        # print("current_nu_line = %g"%storage.line_list_nu[current_line_id])
+        # print("no of lines: %d"% storage.no_of_lines)
+
+
         if current_line_id == storage.no_of_lines:
             #setting flag that the packet is off the red end of the line list
             last_line = 1
@@ -543,13 +707,13 @@ def montecarlo_radial1d(model, int_type_t virtual_packet_flag=0):
             reabsorbed = montecarlo_one_packet(storage, &current_nu, &current_energy, &current_mu, &current_shell_id,
                                                &current_r, &current_line_id, &last_line, &close_line,
                                                &recently_crossed_boundary, virtual_packet_flag,
-                                               -1)
+                                               -1,enable_bf_i)
 
             #print "I'M ABOUT TO START A REAL PACKET"
         #Now can do the propagation of the real packet
         reabsorbed = montecarlo_one_packet(storage, &current_nu, &current_energy, &current_mu, &current_shell_id,
                                            &current_r, &current_line_id, &last_line, &close_line,
-                                           &recently_crossed_boundary, virtual_packet_flag, 0)
+                                           &recently_crossed_boundary, virtual_packet_flag, 0 ,enable_bf_i)
 
         if reabsorbed == 1: #reabsorbed
             output_nus[i] = -current_nu
@@ -576,7 +740,7 @@ cdef int_type_t montecarlo_one_packet(StorageModel storage, float_type_t*current
                                       float_type_t*current_mu, int_type_t*current_shell_id, float_type_t*current_r,
                                       int_type_t*current_line_id, int_type_t*last_line, int_type_t*close_line,
                                       int_type_t*recently_crossed_boundary, int_type_t virtual_packet_flag,
-                                      int_type_t virtual_mode):
+                                      int_type_t virtual_mode, int_type_t enable_bf):
     cdef int_type_t i
     cdef float_type_t current_nu_virt
     cdef float_type_t current_energy_virt
@@ -596,7 +760,7 @@ cdef int_type_t montecarlo_one_packet(StorageModel storage, float_type_t*current
         #print "I'M DOING A REAL PACKET"
         reabsorbed = montecarlo_one_packet_loop(storage, current_nu, current_energy, current_mu, current_shell_id,
                                                 current_r, current_line_id, last_line, close_line,
-                                                recently_crossed_boundary, virtual_packet_flag, 0)
+                                                recently_crossed_boundary, virtual_packet_flag, 0,enable_bf)
     else:
         #print "I'M DOING AN EXTRACT"
         for i in range(virtual_packet_flag):
@@ -635,7 +799,7 @@ cdef int_type_t montecarlo_one_packet(StorageModel storage, float_type_t*current
             reabsorbed = montecarlo_one_packet_loop(storage, &current_nu_virt, &current_energy_virt, &current_mu_virt,
                                                     &current_shell_id_virt, &current_r_virt, &current_line_id_virt,
                                                     &last_line_virt, &close_line_virt,
-                                                    &recently_crossed_boundary_virt, virtual_packet_flag, 1)
+                                                    &recently_crossed_boundary_virt, virtual_packet_flag, 1,enable_bf)
 
 
             #Putting the virtual nu into the output spectrum
@@ -655,7 +819,7 @@ cdef int_type_t montecarlo_one_packet_loop(StorageModel storage, float_type_t*cu
                                            float_type_t*current_mu, int_type_t*current_shell_id, float_type_t*current_r,
                                            int_type_t*current_line_id, int_type_t*last_line, int_type_t*close_line,
                                            int_type_t*recently_crossed_boundary, int_type_t virtual_packet_flag,
-                                           int_type_t virtual_packet):
+                                           int_type_t virtual_packet, int_type_t enable_bf):
     cdef float_type_t nu_electron = 0.0
     cdef float_type_t comov_nu = 0.0
     cdef float_type_t comov_energy = 0.0
@@ -678,7 +842,7 @@ cdef int_type_t montecarlo_one_packet_loop(StorageModel storage, float_type_t*cu
     cdef float_type_t d_inner = 0.0
     cdef float_type_t d_outer = 0.0
     cdef float_type_t d_line = 0.0
-    cdef float_type_t d_electron = 0.0
+    cdef float_type_t d_continuum = 0.0
 
     cdef int_type_t reabsorbed = 0
     cdef float_type_t nu_line = 0.0
@@ -697,6 +861,15 @@ cdef int_type_t montecarlo_one_packet_loop(StorageModel storage, float_type_t*cu
     #-----------------------
 
     while True:
+
+        #Check if current is smaller than the nu of the line with the highest frequency
+        if current_nu[0] < storage.line_list_nu[storage.no_of_lines - 1] and last_line[0] == 0:
+            print("WARNING comoving nu less than nu_line shouldn't happen; MAIN LOOP")
+            print("current_nu %g" %current_nu[0])
+            last_line[0] = 1
+
+
+
         #check if we are at the end of linelist
         if last_line[0] == 0:
             nu_line = storage.line_list_nu[current_line_id[0]]
@@ -742,11 +915,26 @@ cdef int_type_t montecarlo_one_packet_loop(StorageModel storage, float_type_t*cu
             # ------------------ ELECTRON DISTANCE CALCULATION ---------------------
             # a virtual packet should never be stopped by continuum processes
             if (virtual_packet > 0):
-                d_electron = miss_distance
+                d_continuum = miss_distance
             else:
-                d_electron = compute_distance2electron(current_r[0], current_mu[0], tau_event,
-                                                       storage.inverse_electron_density[current_shell_id[0]] * \
-                                                       storage.inverse_sigma_thomson)
+                #d_continuum is the distance to the nex continuums event. The continuums distance contains the bound-free, the free-free and, the thomson distance.
+                d_continuum = compute_distance2continum(tau_event,
+                                                        current_nu[0],
+                                                        storage.kappa_bf_nu_view,
+                                                        storage.bf_nu_bin_view,
+                                                        storage.electron_density[current_shell_id[0]],
+                                                        storage.sigma_thomson,
+                                                        current_shell_id
+                                                        )
+
+                #---Disable cont opa.
+                #d_continuum = miss_distance
+
+
+
+                #d_continuum = compute_distance2electron(current_r[0], current_mu[0], tau_event,
+                #                                      storage.inverse_electron_density[current_shell_id[0]] * \
+                #                                      storage.inverse_sigma_thomson)
                 # ^^^^^^^^^^^^^^^^^^ ELECTRON DISTANCE CALCULATION ^^^^^^^^^^^^^^^^^^^^^
 
 
@@ -769,13 +957,15 @@ cdef int_type_t montecarlo_one_packet_loop(StorageModel storage, float_type_t*cu
                                 d_electron,
                                 d_line,
                                 '-' * 80)
+            if tau_event < 0:
+                packet_logger.warning('tau_event is less than 0, %f '% tau_event)
 
             if isnan(d_inner) or d_inner < 0:
                 packet_logger.warning('d_inner is nan or less than 0')
             if isnan(d_outer) or d_outer < 0:
                 packet_logger.warning('d_outer is nan or less than 0')
-            if isnan(d_electron) or d_electron < 0:
-                packet_logger.warning('d_electron is nan or less than 0')
+            if isnan(d_continuum) or d_continuum < 0:
+                packet_logger.warning('d_continuum is nan or less than 0, %f'% d_continuum)
             if isnan(d_line) or d_line < 0:
                 packet_logger.warning('d_line is nan or less than 0')
 
@@ -783,12 +973,12 @@ cdef int_type_t montecarlo_one_packet_loop(StorageModel storage, float_type_t*cu
 
 
                 #if ((abs(storage.r_inner[current_shell_id[0]] - current_r[0]) < 10.0) and (current_mu[0] < 0.0)):
-                #print "d_outer %g, d_inner %g, d_line %g, d_electron %g" % (d_outer, d_inner, d_line, d_electron)
+                #print "d_outer %g, d_inner %g, d_line %g, d_continuum %g" % (d_outer, d_inner, d_line, d_continuum)
                 #print "nu_line %g current_nu[0] %g current_line_id[0] %g" % (nu_line, current_nu[0], current_line_id[0])
                 #print "%g " % current_shell_id[0]
 
         # ------------------------ PROPAGATING OUTWARDS ---------------------------
-        if (d_outer <= d_inner) and (d_outer <= d_electron) and (d_outer < d_line):
+        if (d_outer <= d_inner) and (d_outer <= d_continuum) and (d_outer < d_line):
             #moving one zone outwards. If it's already in the outermost one this is escaped. Otherwise just move, change the zone index
             #and flag as an outwards propagating packet
             move_packet(current_r, current_mu, current_nu[0], current_energy[0], d_outer, storage.js, storage.nubars,
@@ -823,7 +1013,7 @@ cdef int_type_t montecarlo_one_packet_loop(StorageModel storage, float_type_t*cu
 
 
         # ------------------------ PROPAGATING inwards ---------------------------
-        elif (d_inner <= d_outer) and (d_inner <= d_electron) and (d_inner < d_line):
+        elif (d_inner <= d_outer) and (d_inner <= d_continuum) and (d_inner < d_line):
             #moving one zone inwards. If it's already in the innermost zone this is a reabsorption
             move_packet(current_r, current_mu, current_nu[0], current_energy[0], d_inner, storage.js, storage.nubars,
                         storage.inverse_time_explosion,
@@ -855,7 +1045,7 @@ cdef int_type_t montecarlo_one_packet_loop(StorageModel storage, float_type_t*cu
 
 
         # ------------------------ ELECTRON SCATTER EVENT ELECTRON ---------------------------
-        elif (d_electron <= d_outer) and (d_electron <= d_inner) and (d_electron < d_line):
+        elif (d_continuum <= d_outer) and (d_continuum <= d_inner) and (d_continuum < d_line):
             # we should never enter this branch for a virtual packet
             # ------------------------------ LOGGING ----------------------
             IF packet_logging == True:
@@ -870,22 +1060,146 @@ cdef int_type_t montecarlo_one_packet_loop(StorageModel storage, float_type_t*cu
 
             # ^^^^^^^^^^^^^^^^^^^^^^^^^^^ LOGGING # ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-            doppler_factor = move_packet(current_r, current_mu, current_nu[0], current_energy[0], d_electron,
+            #@@@@@@@@@@@@@@@@@@@@@@@@@@@@Continum Event@@@@@@@@@@@
+            #Sample new z normalized to the sum of the cont kappas.
+            #for i in range(len(storage.bf_nu_bins)-1):
+            #    if ((current_nu[0] <= storage.bf_nu_bins[i]) and (current_nu[0] > storage.bf_nu_bin[i+1])):
+            #        kappa_bf_nu = [i]
+            #       break
+            kappa_bf = getGrayKappaBFbyNu(current_nu[0], storage.bf_nu_bin_view, storage.kappa_bf_nu_view,current_shell_id)
+            kappa_ff = 0#TODO: set kappa ff
+            kappa_th = storage.electron_density[current_shell_id[0]] * storage.sigma_thomson
+            kappa_cont = kappa_bf + kappa_th + kappa_ff
+
+            #Select the cont. event which occurs by using the new z
+            z = kappa_cont * rk_double(&mt_state)
+            if (z > (kappa_ff + kappa_bf)):
+                #electron scattering
+
+
+
+                #compute the doppler_factor
+                doppler_factor = move_packet(current_r, current_mu, current_nu[0], current_energy[0], d_continuum,
                                          storage.js, storage.nubars
                 , storage.inverse_time_explosion, current_shell_id[0], virtual_packet)
 
-            comov_nu = current_nu[0] * doppler_factor
-            comov_energy = current_energy[0] * doppler_factor
+                comov_nu = current_nu[0] * doppler_factor
+                comov_energy = current_energy[0] * doppler_factor
 
-            #new mu chosen
-            current_mu[0] = 2 * rk_double(&mt_state) - 1
-            inverse_doppler_factor = 1 / (
+                #new mu chosen
+                current_mu[0] = 2 * rk_double(&mt_state) - 1
+                inverse_doppler_factor = 1 / (
                 1 - (current_mu[0] * current_r[0] * storage.inverse_time_explosion * inverse_c))
-            current_nu[0] = comov_nu * inverse_doppler_factor
-            current_energy[0] = comov_energy * inverse_doppler_factor
+                current_nu[0] = comov_nu * inverse_doppler_factor
+                current_energy[0] = comov_energy * inverse_doppler_factor
+
+            elif (z > kappa_ff):
+                #print('!-!-!-!-!-!')
+                #bound-free event
+                #Get new mu
+                doppler_factor = move_packet(current_r, current_mu, current_nu[0], current_energy[0], d_continuum,
+                                             storage.js, storage.nubars
+                    , storage.inverse_time_explosion, current_shell_id[0], virtual_packet)
+                comov_energy = current_energy[0] * doppler_factor
+
+                current_mu[0] = 2 * rk_double(&mt_state) - 1
+                comov_nu = rand_nu_planck(storage.t_electron[current_shell_id[0]]) #TODO: get the plasma T
+
+
+                inverse_doppler_factor = 1 / (
+                    1 - (current_mu[0] * current_r[0] * storage.inverse_time_explosion * inverse_c))
+
+                #comov_energy = current_energy[0] * doppler_factor
+
+                current_nu[0] = comov_nu *inverse_doppler_factor
+                current_energy[0] = comov_energy *inverse_doppler_factor
+
+                #since we have drawn a new nu we have to erase the line memories of our photon and create a new memories
+                #current_line_id[0] = getNextLineId(storage.line_list_nu, comov_nu, 0, storage.no_of_lines -1)
+                #TODO remove this quick fix
+                i = getNextLineId(storage.line_list_nu, comov_nu, 0, storage.no_of_lines -1)
+#                while storage.line_list_nu[i] > comov_nu:
+#                    print(i)
+#                    i-=1
+                current_line_id[0] = i
+
+
+                if current_line_id[0] == storage.no_of_lines:
+                    #setting flag that the packet is off the red end of the line list
+                    last_line[0] = 1
+                else:
+                    last_line[0] = 0
+
+                #print('bound-free DEBUG:')
+                #print('current_mu=%g'%current_mu[0])
+                #print('current_nu=%g'%current_nu[0])
+                #print('comov_nu=%g'%comov_nu)
+                #print('current_line_id=%d'%current_line_id[0])
+                #print('nu line - 1=%g'%storage.line_list_nu[current_line_id[0]-1])
+                #print('nu line=%g'%storage.line_list_nu[current_line_id[0]])
+                #print('nu line=%g +1'%storage.line_list_nu[current_line_id[0]+1])
+
+
             # ------------------------------ LOGGING ----------------------
+                IF packet_logging == True:
+                        packet_logger.debug("\n Bound free event occuring\n comoving_nu=%s\n comoving_energy=%s\n current_nu=%s\n current_mu=%s\n current_energy=%s\n line_id=%d\n line_nu=%s\n",
+                                        comov_nu,
+                                        comov_energy,
+                                        current_nu[0],
+                                        current_mu[0],
+                                        current_energy[0],
+                                        current_line_id[0],
+                                        storage.line_list_nu[current_line_id[0]])
+
+
+            else:
+                print('!-!-!-!-!-!2')
+                #free-free event
+            # ------------------------------ LOGGING ----------------------
+                IF packet_logging == True: #THIS SHOULD NEVER HAPPEN SINCE KAPPA_ff is 0
+                    packet_logger.debug("\n Free free event occuring\n comoving_nu=%s\n comoving_energy=%s\n current_nu=%s\n current_mu=%s\n current_energy=%s\n line_id=%d\n line_nu=%s\n",
+                                comov_nu,
+                                comov_energy,
+                                current_nu[0],
+                                current_mu[0],
+                                current_energy[0],
+                                current_line_id[0],
+                                storage.line_list_nu[current_line_id[0]])
+
+                #If electron scattering occurs then correct the photon with the doppler_factor
+
+            #If a bound-free event occurs sample a new nu for the photon
+
+            #If a free-free event occurs, do ??
+
+            #@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+            #
+            #     doppler_factor = move_packet(current_r, current_mu, current_nu[0], current_energy[0], d_continuum,
+            #                              storage.js, storage.nubars
+            #     , storage.inverse_time_explosion, current_shell_id[0], virtual_packet)
+            #
+            #     comov_nu = current_nu[0] * doppler_factor
+            #     comov_energy = current_energy[0] * doppler_factor
+            #
+            # #new mu chosen
+            #     current_mu[0] = 2 * rk_double(&mt_state) - 1
+            #     inverse_doppler_factor = 1 / (
+            #     1 - (current_mu[0] * current_r[0] * storage.inverse_time_explosion * inverse_c))
+            #     current_nu[0] = comov_nu * inverse_doppler_factor
+            #     current_energy[0] = comov_energy * inverse_doppler_factor
+            # ------------------------------ LOGGING ----------------------
+            #     print("\n Free-free event occuring\n comoving_nu=%s\n comoving_energy=%s\n current_nu=%s\n current_mu=%s\n current_energy=%s\n line_id=%d\n line_nu=%s\n"
+            #           %
+            #           (comov_nu,
+            #            comov_energy,
+            #            current_nu[0],
+            #            current_mu[0],
+            #            current_energy[0],
+            #            current_line_id[0],
+            #            storage.line_list_nu[current_line_id[0]]))
+
             IF packet_logging == True:
-                packet_logger.debug('Electron scattering occured\n'
+                packet_logger.debug('Continuums event occured\n'
                                     'current_nu=%s\n'
                                     'current_mu=%s\n'
                                     'current_energy=%s\n%s',
@@ -904,12 +1218,12 @@ cdef int_type_t montecarlo_one_packet_loop(StorageModel storage, float_type_t*cu
                 #print "AN ELECTRON SCATTERING HAPPENED: CALLING VIRTUAL PARTICLES!!!!!!"
                 montecarlo_one_packet(storage, current_nu, current_energy, current_mu, current_shell_id, current_r,
                                       current_line_id, last_line, close_line, recently_crossed_boundary,
-                                      virtual_packet_flag, 1)
+                                      virtual_packet_flag, 1, enable_bf)
 
         # ^^^^^^^^^^^^^^^^^^^^^^^^^ SCATTER EVENT LINE ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
         # ------------------------ LINE SCATTER EVENT  ---------------------------
-        elif (d_line <= d_outer) and (d_line <= d_inner) and (d_line <= d_electron):
+        elif (d_line <= d_outer) and (d_line <= d_inner) and (d_line <= d_continuum):
         #Line scattering
             #It has a chance to hit the line
             if virtual_packet == 0:
@@ -920,10 +1234,36 @@ cdef int_type_t montecarlo_one_packet_loop(StorageModel storage, float_type_t*cu
             tau_line = storage.line_lists_tau_sobolevs[
                 current_shell_id[0] * storage.line_lists_tau_sobolevs_nd + current_line_id[0]]
 
+
+            kappa_bf = getGrayKappaBFbyNu(current_nu[0], storage.bf_nu_bin_view, storage.kappa_bf_nu_view,current_shell_id)
+            kappa_ff = 0#TODO: set kappa ff
+            kappa_th = storage.electron_density[current_shell_id[0]] * storage.sigma_thomson
+            kappa_cont = kappa_bf + kappa_th + kappa_ff
+            #print("line scatter: kappa_cont = %g"%kappa_cont)
+
+            tau_continuum = kappa_cont * d_line
+            ##The tau electron is disabled for debugging
             tau_electron = storage.sigma_thomson * storage.electron_density[current_shell_id[0]] * d_line
-            tau_combined = tau_line + tau_electron
+            #tau_electron = 0
+            tau_combined = tau_line + tau_continuum
+#            tau_combined = tau_line + tau_electron
+            #print("tau_line = %g"%tau_line)
+            #print("tau_electron = %g"%tau_electron)
+            #print("d_line = %g"%d_line)
+            #print("d_cont = %g"%d_continuum)
 
             # ------------------------------ LOGGING ----------------------
+
+            # print("\n Line event occuring\n comoving_nu=%s\n comoving_energy=%s\n current_nu=%s\n current_mu=%s\n current_energy=%s\n line_id=%d\n line_nu=%s\n"
+            #       %
+            #       (comov_nu,
+            #        comov_energy,
+            #        current_nu[0],
+            #        current_mu[0],
+            #        current_energy[0],
+            #        current_line_id[0],
+            #        storage.line_list_nu[current_line_id[0]]))
+
             IF packet_logging == True:
                 packet_logger.debug('%s\nEntering line scattering routine\n'
                                     'Scattering at line %d (nu=%s)\n'
@@ -955,6 +1295,13 @@ cdef int_type_t montecarlo_one_packet_loop(StorageModel storage, float_type_t*cu
             else:
                 #Check for line interaction
                 if tau_event < tau_combined:
+                    #print("----")
+                    #print("d_cont = %g" %(d_continuum))
+                    #print("d_line = %g" %(d_line))
+                    #print("tau_line = %g" % (tau_line))
+                    #print("tau_comb =%g" %(tau_combined))
+                    #print("/----")
+
                 #line event happens - move and scatter packet
                 #choose new mu
                 # ------------------------------ LOGGING ----------------------
@@ -986,7 +1333,7 @@ cdef int_type_t montecarlo_one_packet_loop(StorageModel storage, float_type_t*cu
                     #here comes the macro atom
 
                     #print "A LINE EVENT HAPPENED AT R = %g in shell %g which has range %g to %g" % (current_r[0], current_shell_id[0], storage.r_inner[current_shell_id[0]], storage.r_outer[current_shell_id[0]])
-                    #print "d_outer %g, d_inner %g, d_line %g, d_electron %g" % (d_outer, d_inner, d_line, d_electron)
+                    #print "d_outer %g, d_inner %g, d_line %g, d_continuum %g" % (d_outer, d_inner, d_line, d_continuum)
                     #print "nu_line_1 %g nu_line_2 %g" % (storage.line_list_nu[current_line_id[0]-1], storage.line_list_nu[current_line_id[0]])
                     #print "nu_line_1 %g nu_line_2 %g" % (current_line_id[0]-1, current_line_id[0])
                     #print "last_line %g" % (last_line[0])
@@ -995,9 +1342,12 @@ cdef int_type_t montecarlo_one_packet_loop(StorageModel storage, float_type_t*cu
 
 
                     if storage.line_interaction_id == 0: #scatter
+#                        print('scatter')
                         emission_line_id = current_line_id[0] - 1
+#                        print("emission_line_id = %g" %emission_line_id)
                     elif storage.line_interaction_id >= 1:# downbranch & macro
                         activate_level_id = storage.line2macro_level_upper[current_line_id[0] - 1]
+#                        print('macroatom')
                         #print "HERE %g %g" %(current_line_id[0], activate_level_id)
                         #print "DEST " , (storage.destination_level_id[0], storage.destination_level_id[5], storage.destination_level_id[10])
                         #print "DEST " , (storage.macro_block_references[0], storage.macro_block_references[5], storage.macro_block_references[10])
@@ -1043,13 +1393,17 @@ cdef int_type_t montecarlo_one_packet_loop(StorageModel storage, float_type_t*cu
                         montecarlo_one_packet(storage, current_nu, current_energy, current_mu, current_shell_id,
                                               current_r, current_line_id, last_line, &virtual_close_line,
                                               recently_crossed_boundary,
-                                              virtual_packet_flag, 1)
+                                              virtual_packet_flag, 1,enable_bf)
                         virtual_close_line = 0
 
                 else: #tau_event > tau_line no interaction so far
                     #reducing event tau to take this probability into account
                     tau_event -= tau_line
-
+                    if tau_event < 0:
+                        print('tau_event < 0, %f' % tau_event)
+                        print('tau_line: %f '% tau_line)
+                        print('tau_combined %f '%tau_combined)
+                        a = input()
                     # ------------------------------ LOGGING ----------------------
                     IF packet_logging == True:
                         packet_logger.debug('No line interaction happened. Tau_event decreasing %s\n%s', tau_event,
@@ -1079,7 +1433,7 @@ cdef int_type_t montecarlo_one_packet_loop(StorageModel storage, float_type_t*cu
     # ------------------------------ LOGGING ----------------------
     IF packet_logging == True: #SHOULD NEVER HAPPEN
         if current_energy[0] < 0:
-            logging.warn('Outcoming energy less than 0: %s', current_energy)
+            logging.warn('Outcoming energy less than 0: %s', current_energy[0])
             # ^^^^^^^^^^^^^^^^^^^^^^^^^ SCATTER EVENT LINE ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
     if (virtual_packet > 0):

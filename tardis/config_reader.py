@@ -41,7 +41,7 @@ def calculate_density_after_time(densities, time_0, time_explosion):
     return densities * (time_explosion / time_0) ** -3
 
 
-def calculate_exponential_densities(velocities, velocity_0, rho_0, exponent):
+def calculate_powerlaw_densities(velocities, velocity_0, rho_0, exponent):
     """
 
     This function computes a descret exponential density profile.
@@ -191,11 +191,12 @@ def parse_density_section(density_dict, no_of_shells, v_inner, v_outer, time_exp
 
         densities = calculate_density_after_time(densities, time_0, time_explosion)
 
-        return densities
 
+
+        return densities
     density_parser['branch85_w7'] = parse_branch85
 
-    def parse_exponential(density_dict, no_of_shells, v_inner, v_outer, time_explosion):
+    def parse_powerlaw(density_dict,no_of_shells, v_inner, v_outer, time_explosion):
         time_0 = density_dict.pop('time_0', 19.9999584)
         if isinstance(time_0, basestring):
             time_0 = parse2quantity(time_0).to('s').value
@@ -213,11 +214,24 @@ def parse_density_section(density_dict, no_of_shells, v_inner, v_outer, time_exp
             logger.warning('exponent was not given in the config file! Using %f', exponent)
 
         velocities = 0.5 * (v_inner + v_outer)
-        densities = calculate_exponential_densities(velocities, v_inner[0], rho_0, exponent)
+        densities = calculate_powerlaw_densities(velocities, v_inner[0], rho_0, exponent)
 
         return densities
+    density_parser['powerlaw'] = parse_powerlaw
 
-    density_parser['exponential'] = parse_exponential
+    def parse_exponential_exp(density_dict,no_of_shells, v_inner, v_outer, time_explosion):
+        time_0 = time_explosion
+        vref = float(density_dict.pop('vref'))
+        phi = float(density_dict.pop('phi'))
+        rref = vref * time_0
+        velocities = 0.5 * (v_inner + v_outer)
+        rhoref = phi / 4. / np.pi / rref**2 / vref
+        densities = rhoref * np.exp((vref - velocities)/vref)
+        print(' ')
+        return  densities
+
+
+    density_parser['exponential'] = parse_exponential_exp
 
     try:
         parser = density_parser[density_dict['type']]
@@ -383,11 +397,13 @@ class TardisConfiguration(object):
         #Next finding the time of explosion
 
         try:
-            time_explosion = parse2quantity(yaml_dict['time_explosion']).to('s').value
+            time_explosion_value = parse2quantity(yaml_dict['time_explosion']).to('s').value
+            time_explosion_unit = parse2quantity(yaml_dict['time_explosion']).to('s').unit
         except AttributeError as ae:
             logger.critical(str(ae))
             raise ae
 
+        time_explosion = units.Quantity(float(time_explosion_value), time_explosion_unit).to('s').value
         config_dict['time_explosion'] = time_explosion
 
         if 'log_lsun' in yaml_dict['luminosity']:

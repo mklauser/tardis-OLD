@@ -121,9 +121,9 @@ class Radial1DModel(object):
         self.radiative_rates_type = tardis_config.radiative_rates_type
         if self.plasma_type == 'lte':
             self.plasma_class = plasma.LTEPlasma
-            if tardis_config.ws is not None:
-                raise ValueError(
-                    "the dilution factor W ('ws') can only be specified when selecting plasma_type='nebular'")
+            #if tardis_config.ws is not None:
+            #    raise ValueError(
+            #        "the dilution factor W ('ws') can only be specified when selecting plasma_type='nebular'")
 
         elif self.plasma_type == 'nebular':
             self.plasma_class = plasma.NebularPlasma
@@ -206,6 +206,9 @@ class Radial1DModel(object):
     def initialize_plasmas(self):
         self.plasmas = []
         self.tau_sobolevs = np.zeros((self.no_of_shells, len(self.atom_data.lines)))
+        kappa_bf_nu = []
+        kappa_bf_gray = []
+        t_electron = []
         self.line_list_nu = self.atom_data.lines['nu']
 
         if self.line_interaction_id in (1, 2):
@@ -227,9 +230,18 @@ class Radial1DModel(object):
                 current_plasma.set_j_blues(j_blues)
                 current_plasma.update_radiationfield(current_t_rad)
                 self.tau_sobolevs[i] = current_plasma.tau_sobolevs
+                if self.atom_data.has_ion_cx_data:
+                    kappa_bf_nu.append(current_plasma.kappa_bf_nu)
+                    kappa_bf_gray.append(current_plasma.kappa_bf_gray)
+                    self.kappa_bf_nu_bins = current_plasma.bf_nu_bins
+                t_electron.append(current_plasma.t_electron)
 
                 self.plasmas.append(current_plasma)
 
+            if self.atom_data.has_ion_cx_data:
+                self.kappa_bf_nu = np.array(kappa_bf_nu)
+                self.kappa_bf_gray = np.array(kappa_bf_gray)
+            self.t_electron = np.array(t_electron)
 
         elif self.plasma_type == 'nebular':
             for i, ((tmp_index, current_abundances), current_t_rad, current_w) in \
@@ -249,8 +261,12 @@ class Radial1DModel(object):
                 current_plasma.update_radiationfield(current_t_rad, current_w)
 
                 self.tau_sobolevs[i] = current_plasma.tau_sobolevs
+                if self.atom_data.has_ion_cx_data:
+                    __kappa_bf.append(current_plasma.bf_kappa)
 
                 self.plasmas.append(current_plasma)
+            if self.atom_data.has_ion_cx_data:
+                self.kappa_bf = np.array(__kappa_bf)
 
         self.tau_sobolevs = np.array(self.tau_sobolevs, dtype=float)
         self.j_blues = np.zeros_like(self.tau_sobolevs)
@@ -375,16 +391,17 @@ class Radial1DModel(object):
         self.spec_virtual_flux_angstrom = (self.spec_virtual_flux_nu * self.spec_nu ** 2 / constants.c.cgs / 1e8)
 
 
-    def simulate(self, update_radiation_field=True, enable_virtual=False):
+    def simulate(self, update_radiation_field=True, enable_virtual=False, enable_bf=False):
         self.create_packets()
         self.spec_virtual_flux_nu[:] = 0.0
         if enable_virtual:
+#TODO: Add a switch to enabel bf and ff
             self.montecarlo_nu, self.montecarlo_energies, self.j_estimators, self.nubar_estimators = \
                 montecarlo_multizone.montecarlo_radial1d(self,
-                                                         virtual_packet_flag=self.tardis_config.no_of_virtual_packets)
+                                                        virtual_packet_flag=self.tardis_config.no_of_virtual_packets,enable_bf=enable_bf)
         else:
             self.montecarlo_nu, self.montecarlo_energies, self.j_estimators, self.nubar_estimators = \
-                montecarlo_multizone.montecarlo_radial1d(self)
+                montecarlo_multizone.montecarlo_radial1d(self,enable_bf=enable_bf)
 
         self.normalize_j_blues()
 

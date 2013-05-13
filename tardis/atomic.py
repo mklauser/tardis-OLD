@@ -219,8 +219,8 @@ def read_collision_data(fname):
 def read_ion_cx_data(fname):
     try:
         h5_file = h5py.File(fname)
-        ion_cx_th_data = h5_file['ionization_cx_threshold']
-        ion_cx_sp_data = h5_file['ionization_cx_support']
+        ion_cx_th_data = h5_file['ion_cx_th_data']
+        ion_cx_sp_data = h5_file['ion_cx_sp_data']
         return ion_cx_th_data, ion_cx_sp_data
     except IOError, err:
         print(err.errno)
@@ -330,7 +330,8 @@ class AtomData(object):
         else:
             synpp_refs = None
 
-        if 'ion_cx_data' in h5_datasets and 'ion_cx_data' in h5_datasets:
+
+        if 'ion_cx_th_data' in h5_datasets and 'ion_cx_sp_data' in h5_datasets:
             ion_cx_data = read_ion_cx_data(fname)
         else:
             ion_cx_data = None
@@ -339,12 +340,14 @@ class AtomData(object):
                         lines_data=lines_data, macro_atom_data=macro_atom_data, zeta_data=zeta_data,
                         collision_data=(collision_data, collision_data_temperatures), synpp_refs=synpp_refs,
                         ion_cx_data=ion_cx_data)
+        try:
 
-        with h5py.File(fname) as h5_file:
-            atom_data.uuid1 = h5_file.attrs['uuid1']
-            atom_data.md5 = h5_file.attrs['md5']
-            logger.info('Read Atom Data with UUID=%s and MD5=%s', atom_data.uuid1, atom_data.md5)
-
+            with h5py.File(fname) as h5_file:
+                atom_data.uuid1 = h5_file.attrs['uuid1']
+                atom_data.md5 = h5_file.attrs['md5']
+        except KeyError as e:
+            logger.warning('No or no valid md5 checksum stored in the hd5 file')
+            logger.warning(str(e))
         return atom_data
 
     def __init__(self, atom_data, ionization_data, levels_data, lines_data, macro_atom_data=None, zeta_data=None,
@@ -364,9 +367,11 @@ class AtomData(object):
             #TODO:Farm a panda here
             self.ion_cx_th_data = DataFrame(np.array(ion_cx_data[0]))
             self.ion_cx_th_data.set_index(['atomic_number', 'ion_number', 'level_id'], inplace=True)
-
-            self.ion_cx_sp_data = DataFrame(np.array(ion_cx_data[1]))
-            self.ion_cx_sp_data.set_index(['atomic_number', 'ion_number', 'level_id'])
+            try:
+                self.ion_cx_sp_data = DataFrame(np.array(ion_cx_data[1]))
+            except:
+                self.ion_cx_sp_data = DataFrame(np.zeros(1,dtype=ion_cx_data[1].dtype))
+            self.ion_cx_sp_data.set_index(['atomic_number', 'ion_number', 'level_id'], inplace=True)
         else:
             self.has_ion_cx_data = False
 
@@ -528,6 +533,15 @@ class AtomData(object):
         #Setting NLTE species
         self.set_nlte_mask(nlte_species)
 
+        #Set the reduced ion cx.
+        if self.has_ion_cx_data:
+            self.ion_cx_th = self.ion_cx_th_data[self.ion_cx_th_data.index.get_level_values(0).isin(self.selected_atomic_numbers)]
+            self.ion_cx_sp = self.ion_cx_sp_data[self.ion_cx_sp_data.index.get_level_values(0).isin(self.selected_atomic_numbers)]
+            if max_ion_number is not None:
+                self.ion_cx_th = self.ion_cx_th[self.ion_cx_th.index.get_level_values(1) <= max_ion_number]
+                self.ion_cx_sp = self.ion_cx_sp[self.ion_cx_sp.index.get_level_valees(1) <= max_ion_number]
+            #self.ion_cx_th.set_index(['atomic_number', 'ion_number', 'level_id'], inplace=True)
+            #self.ion_cx_sp.set_index(['atomic_number', 'ion_number', 'level_id'], inplace=True)
 
     def set_nlte_mask(self, nlte_species):
 

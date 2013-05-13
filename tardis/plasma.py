@@ -177,6 +177,7 @@ class LTEPlasma(BasePlasma):
         self.calculate_level_populations()
         self.calculate_tau_sobolev()
         self.calculate_nlte_level_populations()
+        self.calculate_bound_free()
 
         if self.initialize:
             self.initialize = False
@@ -293,7 +294,6 @@ class LTEPlasma(BasePlasma):
 
             neutral_atom_density = self.abundances.ix[atomic_number] / (1 + np.sum(phis_product))
             ion_densities = [neutral_atom_density] + list(neutral_atom_density * phis_product)
-
             self.ion_number_density.ix[atomic_number] = ion_densities
 
 
@@ -440,21 +440,74 @@ class LTEPlasma(BasePlasma):
         """
         :return:
         """
-        nu_bins = range(1000, 10000, 1000) #TODO: get the binning from the input file.
+        __nu_bin_size = 1.0e15
+        self.bf_nu_bin_size = __nu_bin_size
+        nu_bins = np.arange(1e14, 2e16, __nu_bin_size) #TODO: get the binning from the input file.
+        self.bf_nu_bins = np.array(nu_bins)
         try:
-            bf = np.zeros(len(self.atom_data.levels), len(self.atom_data.selected_atomic_numbers), len(nu_bins))
+            bf = np.zeros(((len(nu_bins) * len(self.atom_data.atom_ion_index) * len(self.atom_data.levels))),
+                          dtype=[('nu', 'f4'), ('atom_number', 'i4'), ('ion_number', 'i4'), ('level_number', 'i4'),
+                                 ('ion_cx', 'f4')])
+            bf_nu = np.zeros(len(nu_bins), dtype=float)
         except AttributeError:
-            logger.critical("Err creating the bf array.")
+            logger.critical("Error: Unable to create the bf array.")
 
         phis = self.calculate_saha()
+        current_electron_density = self.electron_density
         nnlevel = self.level_populations
-        for nu in nu_bins:
-            for i, (level_id, level) in enumerate(self.atom_data.levels.iterrows()):
+        j = 0
+
+
+        for i, nu in enumerate(nu_bins):
+            expfactor = np.exp( - constants.h.cgs.value * nu / self.t_electron / constants.k_B.cgs.value)
+            if expfactor < 1e-200:
+                break
+            print('computing the bf')
+            sumbf = 0
+            for ii, (level_id, level) in enumerate(self.atom_data.levels.iterrows()):
+                #TODO:remove this
+                j += 1
                 atomic_number = level.name[0]
                 ion_number = level.name[1]
                 level_number = level.name[2]
-                sigma_bf_th = self.atom_data.ion_cx_th.ix[atomic_number, ion_number, level_number]
-                phi = phis.ix[atomic_number, ion_number]
+                if ion_number < atomic_number:
+                    sigma_bf_th = self.atom_data.ion_cx_th.ix[atomic_number, ion_number, level_number]
+                    phi = phis.ix[atomic_number, ion_number + 1]
+                    current_level_population = self.level_populations.ix[atomic_number, ion_number, level_number]
+                    if ion_number + 1 == atomic_number:
+                        current_level_population_next_level = self.level_populations.ix[
+                            atomic_number, ion_number + 1, 0]
+                    else:
+                        try:
+                            current_level_population_next_level = self.level_populations.ix[
+                                atomic_number, ion_number + 1, level_number]
+                        except:
+                            logger.warning(
+                                'There is no level population for the level with atomic number %d, ion number %d and, level number %d available ' % (
+                                atomic_number, (ion_number + 1), level_number))
+                    kappa_bf = current_level_population * sigma_bf_th.ix['ion_cx_threshold'] * (
+                    1 - (current_level_population_next_level / current_level_population) * phi) * expfactor
+                    if kappa_bf < 0: kappa_bf = 0
+                    bf[j]['ion_cx'] = kappa_bf
+                    sumbf += kappa_bf
+                else:
+                    bf[j]['ion_cx'] = 0
+                bf[j]['nu'] = nu
+                bf[j]['level_number'] = int(level_number)
+                bf[j]['ion_number'] = ion_number
+                bf[j]['atom_number'] = atomic_number
+            bf_nu[i] = sumbf
+
+        self.kappa_bf_nu = bf_nu
+        self.kappa_bf_gray = bf_nu.sum()
+        #self.bf_kappa = bf[:(j+1)]
+        bf_kappa_data = pd.DataFrame(bf)
+        bf_kappa_data.set_index(['atom_number', 'ion_number', 'level_number'], inplace=True)
+        self.kappa_bf = bf_kappa_data
+        foo = 40
+
+
+
 
 
     def update_macro_atom(self):
