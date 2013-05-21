@@ -3,6 +3,9 @@
 #import constants
 import numpy as np
 import logging
+import os as os
+import hashlib
+
 from astropy import table, units, constants
 from collections import OrderedDict
 
@@ -177,7 +180,11 @@ class LTEPlasma(BasePlasma):
         self.calculate_level_populations()
         self.calculate_tau_sobolev()
         self.calculate_nlte_level_populations()
-        self.calculate_bound_free()
+        #TODO: load bf if available, if not compute new
+
+        if not self.load_bound_free():
+            self.calculate_bound_free()
+            self.save_bound_free()
 
         if self.initialize:
             self.initialize = False
@@ -436,18 +443,60 @@ class LTEPlasma(BasePlasma):
         n_lower = self.level_populations.values[self.atom_data.lines_lower2level_idx]
         self.tau_sobolevs = sobolev_coefficient * f_lu * wavelength * self.time_explosion * n_lower
 
+    def load_bound_free(self):
+        """
+        This function load the bound-free cross sections if available and returns 0 in case of success.
+        """
+        
+        m = hashlib.md5()
+        m.update(str(self.abundances))
+        hashvalue = m.hexdigest()
+        directory = 'bf-tmp'
+        fname = directory + '/' + str(self.zone_id) +'-' +str(self.t_electron) + '-' + hashvalue
+
+        try:
+            self.kappa_bf_gray = np.load(fname+ '-kappa_bf_gray.npy')
+            self.kappa_bf_nu = np.load(fname + '-kappa_bf_nu.npy')
+            self.kappa_bf = np.load(fname + '-kappa_bf.npy')
+            self.bf_nu_bin_size = np.load(fname+ '-bf_nu_bin_size.npy')
+            self.bf_nu_bins = np.load(fname+ '-bf_nu_bins.npy')
+            return True
+        except IOError:
+            print("No matching bf file available")
+            return False
+
+
+    def save_bound_free(self):
+        """
+        This function saves the bound-free cross sections. In case that they are still exists they will be overwritten.
+        """
+        m = hashlib.md5()
+        m.update(str(self.abundances))
+        hashvalue = m.hexdigest()
+        directory = 'bf-tmp'
+        if not os.path.exists(directory):
+               os.makedirs(directory)
+        fname = directory + '/' + str(self.zone_id) +'-' +str(self.t_electron) + '-' + hashvalue
+
+        np.save(fname + '-kappa_bf_gray',self.kappa_bf_gray)
+        np.save(fname + '-kappa_bf_nu',self.kappa_bf_nu)
+        np.save(fname + '-kappa_bf',self.kappa_bf)
+        np.save(fname + '-bf_nu_bin_size',self.bf_nu_bin_size)
+        np.save(fname + '-bf_nu_bins',self.bf_nu_bins)
+
+
     def calculate_bound_free(self):
         """
         :return:
         """
-        __nu_bin_size = 1.0e15
+        __nu_bin_size = 9.9e13
         self.bf_nu_bin_size = __nu_bin_size
         nu_bins = np.arange(1e14, 2e16, __nu_bin_size) #TODO: get the binning from the input file.
         self.bf_nu_bins = np.array(nu_bins)
         try:
             bf = np.zeros(((len(nu_bins) * len(self.atom_data.atom_ion_index) * len(self.atom_data.levels))),
                           dtype=[('nu', 'f4'), ('atom_number', 'i4'), ('ion_number', 'i4'), ('level_number', 'i4'),
-                                 ('ion_cx', 'f4')])
+                                 ('kappa_bf', 'f4')])
             bf_nu = np.zeros(len(nu_bins), dtype=float)
         except AttributeError:
             logger.critical("Error: Unable to create the bf array.")
@@ -456,6 +505,8 @@ class LTEPlasma(BasePlasma):
         current_electron_density = self.electron_density
         nnlevel = self.level_populations
         j = 0
+        #save and load bf
+
 
 
         for i, nu in enumerate(nu_bins):
@@ -470,28 +521,32 @@ class LTEPlasma(BasePlasma):
                 atomic_number = level.name[0]
                 ion_number = level.name[1]
                 level_number = level.name[2]
+
                 if ion_number < atomic_number:
-                    sigma_bf_th = self.atom_data.ion_cx_th.ix[atomic_number, ion_number, level_number]
-                    phi = phis.ix[atomic_number, ion_number + 1]
-                    current_level_population = self.level_populations.ix[atomic_number, ion_number, level_number]
-                    if ion_number + 1 == atomic_number:
-                        current_level_population_next_level = self.level_populations.ix[
-                            atomic_number, ion_number + 1, 0]
-                    else:
+                    ion_Energy = self.atom_data.ionization_data.ix[atomic_number,ion_number + 1]
+                    ion_nu = ion_Energy/ constants.h.cgs.value
+                    photon_Energy = constants.h.cgs.value * nu
+                    if ion_Energy <= photon_Energy:
+                        sigma_bf_th = self.atom_data.ion_cx_th.ix[atomic_number, ion_number, level_number] (ion_nu/nu)**3
+                        phi = phis.ix[atomic_number, ion_number +1]
+                        current_level_population = self.level_populations.ix[atomic_number, ion_number, level_number]
                         try:
                             current_level_population_next_level = self.level_populations.ix[
-                                atomic_number, ion_number + 1, level_number]
+                                atomic_number, ion_number + 1, 0]
+                            kappa_bf = current_level_population * sigma_bf_th.ix['ion_cx_threshold'] * (
+                                1 - (current_level_population_next_level / current_level_population) * phi  / self.electron_density) * expfactor
+                            if kappa_bf < 0: kappa_bf = 0
+                            bf[j]['kappa_bf'] = kappa_bf
+                            sumbf += kappa_bf
+
                         except:
                             logger.warning(
                                 'There is no level population for the level with atomic number %d, ion number %d and, level number %d available ' % (
                                 atomic_number, (ion_number + 1), level_number))
-                    kappa_bf = current_level_population * sigma_bf_th.ix['ion_cx_threshold'] * (
-                    1 - (current_level_population_next_level / current_level_population) * phi) * expfactor
-                    if kappa_bf < 0: kappa_bf = 0
-                    bf[j]['ion_cx'] = kappa_bf
-                    sumbf += kappa_bf
+
+
                 else:
-                    bf[j]['ion_cx'] = 0
+                    bf[j]['kappa_bf'] = 0
                 bf[j]['nu'] = nu
                 bf[j]['level_number'] = int(level_number)
                 bf[j]['ion_number'] = ion_number
