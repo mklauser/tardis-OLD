@@ -489,10 +489,50 @@ class LTEPlasma(BasePlasma):
         """
         :return:
         """
-        __nu_bin_size = 9.9e13
+
+        __nu_bin_size = 1.9e15
         self.bf_nu_bin_size = __nu_bin_size
         nu_bins = np.arange(1e14, 2e16, __nu_bin_size) #TODO: get the binning from the input file.
         self.bf_nu_bins = np.array(nu_bins)
+
+        phis = self.calculate_saha()
+        current_electron_density = self.electron_density
+
+        def get_data_from_panda(atomic_number,ion_number,level_number):
+            ion_energy = self.atom_data.ionization_data.ix[atomic_number,ion_number+1].ix['ionization_energy']
+            ion_nu = ion_energy/ constants.h.cgs.value
+            cx = self.atom_data.ion_cx_th.ix[atomic_number, ion_number, level_number].ix['ion_cx_threshold']
+            level_population_next_next_ion = self.level_populations.ix[atomic_number, ion_number + 1, 0]
+            phi = phis.ix[atomic_number, ion_number +1]
+            current_level_population = self.level_populations.ix[atomic_number, ion_number, level_number]
+            return np.array([ion_energy,ion_nu,cx,current_level_population,level_population_next_next_ion,phi])
+
+        levels_record_array = self.atom_data.levels.reset_index().to_records()
+        get_data_from_panda_array = np.vectorize(get_data_from_panda,otypes=[np.ndarray])
+
+        kappa_bf_array = np.zeros((len(levels_record_array['atomic_number']),len(nu_bins)))
+
+        ion_atom_mask = levels_record_array['atomic_number'] > levels_record_array['ion_number']
+
+
+        atomic_data_array = np.vstack(get_data_from_panda_array(levels_record_array['atomic_number'][ion_atom_mask],levels_record_array['ion_number'][ion_atom_mask],levels_record_array['level_number'][ion_atom_mask]))
+        expfactor_array = np.exp( - constants.h.cgs.value *nu_bins / self.t_electron / constants.k_B.cgs.value)
+
+
+        nu_edge_mask = (atomic_data_array[:,1,None] > nu_bins[None,:]) # The greater is switch to a smaller to greater
+
+        kappa_bf_ion_atom_mask_array = (atomic_data_array[:,3,None] * atomic_data_array[:,2,None]*(atomic_data_array[:,1,None]/nu_bins[None,None,:])**3 \
+        * (1 - (atomic_data_array[:,3,None]/atomic_data_array[:,4,None]) * atomic_data_array[:,5,None] / self.electron_density )* expfactor_array[None,None,:]).reshape(kappa_bf_array[ion_atom_mask,:].shape)
+
+
+        #Set all kappas 0 where nu _edge > nu
+        kappa_bf_ion_atom_mask_array[nu_edge_mask] = 0
+
+        kappa_bf_array[ion_atom_mask,:] =  kappa_bf_ion_atom_mask_array
+        kappa_bf_nu = kappa_bf_array.sum(axis=0)
+        kappa_bf_grey = kappa_bf_nu.sum()
+
+
         try:
             bf = np.zeros(((len(nu_bins) * len(self.atom_data.atom_ion_index) * len(self.atom_data.levels))),
                           dtype=[('nu', 'f4'), ('atom_number', 'i4'), ('ion_number', 'i4'), ('level_number', 'i4'),
@@ -507,6 +547,8 @@ class LTEPlasma(BasePlasma):
         j = 0
         #save and load bf
 
+        levels_record_array = self.atom_data.levels.reset_index().to_records()
+
 
 
         for i, nu in enumerate(nu_bins):
@@ -515,25 +557,25 @@ class LTEPlasma(BasePlasma):
                 break
             print('computing the bf')
             sumbf = 0
-            for ii, (level_id, level) in enumerate(self.atom_data.levels.iterrows()):
+            for ii, level in enumerate(levels_record_array):
                 #TODO:remove this
                 j += 1
-                atomic_number = level.name[0]
-                ion_number = level.name[1]
-                level_number = level.name[2]
+                atomic_number = level['atomic_number']
+                ion_number = level['ion_number']
+                level_number = level['level_number']
 
                 if ion_number < atomic_number:
-                    ion_Energy = self.atom_data.ionization_data.ix[atomic_number,ion_number + 1]
+                    ion_Energy = self.atom_data.ionization_data.ix[atomic_number,ion_number + 1].ix['ionization_energy']
                     ion_nu = ion_Energy/ constants.h.cgs.value
                     photon_Energy = constants.h.cgs.value * nu
                     if ion_Energy <= photon_Energy:
-                        sigma_bf_th = self.atom_data.ion_cx_th.ix[atomic_number, ion_number, level_number] (ion_nu/nu)**3
+                        sigma_bf_th = self.atom_data.ion_cx_th.ix[atomic_number, ion_number, level_number].ix['ion_cx_threshold'] * (ion_nu/nu)**3
                         phi = phis.ix[atomic_number, ion_number +1]
                         current_level_population = self.level_populations.ix[atomic_number, ion_number, level_number]
                         try:
                             current_level_population_next_level = self.level_populations.ix[
                                 atomic_number, ion_number + 1, 0]
-                            kappa_bf = current_level_population * sigma_bf_th.ix['ion_cx_threshold'] * (
+                            kappa_bf = current_level_population * sigma_bf_th * (
                                 1 - (current_level_population_next_level / current_level_population) * phi  / self.electron_density) * expfactor
                             if kappa_bf < 0: kappa_bf = 0
                             bf[j]['kappa_bf'] = kappa_bf
@@ -548,7 +590,7 @@ class LTEPlasma(BasePlasma):
                 else:
                     bf[j]['kappa_bf'] = 0
                 bf[j]['nu'] = nu
-                bf[j]['level_number'] = int(level_number)
+                bf[j]['level_number'] = level_number
                 bf[j]['ion_number'] = ion_number
                 bf[j]['atom_number'] = atomic_number
             bf_nu[i] = sumbf
