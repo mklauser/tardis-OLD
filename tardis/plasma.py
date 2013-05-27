@@ -533,74 +533,12 @@ class LTEPlasma(BasePlasma):
         kappa_bf_grey = kappa_bf_nu.sum()
 
 
-        try:
-            bf = np.zeros(((len(nu_bins) * len(self.atom_data.atom_ion_index) * len(self.atom_data.levels))),
-                          dtype=[('nu', 'f4'), ('atom_number', 'i4'), ('ion_number', 'i4'), ('level_number', 'i4'),
-                                 ('kappa_bf', 'f4')])
-            bf_nu = np.zeros(len(nu_bins), dtype=float)
-        except AttributeError:
-            logger.critical("Error: Unable to create the bf array.")
-
-        phis = self.calculate_saha()
-        current_electron_density = self.electron_density
-        nnlevel = self.level_populations
-        j = 0
-        #save and load bf
-
-        levels_record_array = self.atom_data.levels.reset_index().to_records()
-
-
-
-        for i, nu in enumerate(nu_bins):
-            expfactor = np.exp( - constants.h.cgs.value * nu / self.t_electron / constants.k_B.cgs.value)
-            if expfactor < 1e-200:
-                break
-            print('computing the bf')
-            sumbf = 0
-            for ii, level in enumerate(levels_record_array):
-                #TODO:remove this
-                j += 1
-                atomic_number = level['atomic_number']
-                ion_number = level['ion_number']
-                level_number = level['level_number']
-
-                if ion_number < atomic_number:
-                    ion_Energy = self.atom_data.ionization_data.ix[atomic_number,ion_number + 1].ix['ionization_energy']
-                    ion_nu = ion_Energy/ constants.h.cgs.value
-                    photon_Energy = constants.h.cgs.value * nu
-                    if ion_Energy <= photon_Energy:
-                        sigma_bf_th = self.atom_data.ion_cx_th.ix[atomic_number, ion_number, level_number].ix['ion_cx_threshold'] * (ion_nu/nu)**3
-                        phi = phis.ix[atomic_number, ion_number +1]
-                        current_level_population = self.level_populations.ix[atomic_number, ion_number, level_number]
-                        try:
-                            current_level_population_next_level = self.level_populations.ix[
-                                atomic_number, ion_number + 1, 0]
-                            kappa_bf = current_level_population * sigma_bf_th * (
-                                1 - (current_level_population_next_level / current_level_population) * phi  / self.electron_density) * expfactor
-                            if kappa_bf < 0: kappa_bf = 0
-                            bf[j]['kappa_bf'] = kappa_bf
-                            sumbf += kappa_bf
-
-                        except:
-                            logger.warning(
-                                'There is no level population for the level with atomic number %d, ion number %d and, level number %d available ' % (
-                                atomic_number, (ion_number + 1), level_number))
-
-
-                else:
-                    bf[j]['kappa_bf'] = 0
-                bf[j]['nu'] = nu
-                bf[j]['level_number'] = level_number
-                bf[j]['ion_number'] = ion_number
-                bf[j]['atom_number'] = atomic_number
-            bf_nu[i] = sumbf
-
-        self.kappa_bf_nu = bf_nu
-        self.kappa_bf_gray = bf_nu.sum()
+        self.kappa_bf_nu = kappa_bf_nu
+        self.kappa_bf_gray = kappa_bf_grey
         #self.bf_kappa = bf[:(j+1)]
         bf_kappa_data = pd.DataFrame(bf)
         bf_kappa_data.set_index(['atom_number', 'ion_number', 'level_number'], inplace=True)
-        self.kappa_bf = bf_kappa_data
+        self.kappa_bf = kappa_bf_array
         foo = 40
 
 
