@@ -455,6 +455,7 @@ class LTEPlasma(BasePlasma):
         fname = directory + '/' + str(self.zone_id) +'-' +str(self.t_electron) + '-' + hashvalue
 
         try:
+            raise  IOError
             self.kappa_bf_gray = np.load(fname+ '-kappa_bf_gray.npy')
             self.kappa_bf_nu = np.load(fname + '-kappa_bf_nu.npy')
             self.kappa_bf = np.load(fname + '-kappa_bf.npy')
@@ -525,19 +526,47 @@ class LTEPlasma(BasePlasma):
         * (1 - (atomic_data_array[:,3,None]/atomic_data_array[:,4,None]) * atomic_data_array[:,5,None] / self.electron_density )* expfactor_array[None,None,:]).reshape(kappa_bf_array[ion_atom_mask,:].shape)
 
 
+        #disable BF
+        #kappa_bf_ion_atom_mask_array[:,:] = 0
+
         #Set all kappas 0 where nu _edge > nu
+
         kappa_bf_ion_atom_mask_array[nu_edge_mask] = 0
 
         kappa_bf_array[ion_atom_mask,:] =  kappa_bf_ion_atom_mask_array
         kappa_bf_nu = kappa_bf_array.sum(axis=0)
         kappa_bf_grey = kappa_bf_nu.sum()
+        dtypeAtom = levels_record_array.dtype.descr
+        NameAtom = [x[0] for x in dtypeAtom]
+
+
+        aShape = levels_record_array.shape[0]
+        #crate dtyps for nu bf list
+        dtypeNu = []
+        nameNu = []
+        for nu in nu_bins:
+            dtypeNu.append(('nu_%s'%nu,'f8'))
+            nameNu.append('nu_%s'%nu)
+
+
+        dtypelist = dtypeAtom + dtypeNu
+        dtypenamelist = [x[0] for x in dtypelist]
+        tmp_full = np.zeros(aShape, dtype=dtypelist)
+
+
+        #fill up the array with values
+        for name in NameAtom:
+            tmp_full[name] = levels_record_array[name]
+
+        for i,name in enumerate(nameNu):
+            tmp_full[name] = kappa_bf_array[:,i]
 
 
         self.kappa_bf_nu = kappa_bf_nu
         self.kappa_bf_gray = kappa_bf_grey
         #self.bf_kappa = bf[:(j+1)]
-        bf_kappa_data = pd.DataFrame(bf)
-        bf_kappa_data.set_index(['atom_number', 'ion_number', 'level_number'], inplace=True)
+        bf_kappa_data = pd.DataFrame(tmp_full)
+        bf_kappa_data.set_index(['atomic_number', 'ion_number', 'level_number'], inplace=True)
         self.kappa_bf = kappa_bf_array
         foo = 40
 
