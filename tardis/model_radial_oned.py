@@ -115,6 +115,9 @@ class Radial1DModel(object):
 
         self.spec_virtual_flux_nu = np.zeros_like(self.spec_nu)
 
+        #set bound-free flag
+        self.disableBoundFree = tardis_config.bound_free
+
 
         #Selecting plasma class
         self.plasma_type = tardis_config.plasma_type

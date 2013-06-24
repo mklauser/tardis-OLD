@@ -535,6 +535,18 @@ class TardisConfiguration(object):
             logger.warn('"w_epsilon" not specified in plasma section - setting it to 1e-10')
             config_dict['w_epsilon'] = 1e-10
 
+
+        ###disable bound-free
+        disableBoundFreeOpacities = plasma_section['disable_bound_free_opacities']
+        if disableBoundFreeOpacities is False:
+            logger.info("Bound free opacities are enabled")
+            config_dict["bound_free"] = True
+        else:
+            logger.info("Bound free opacities are disabled")
+            config_dict["bound_free"] = False
+
+
+
             ##### spectrum section ######
         spectrum_section = yaml_dict.pop('spectrum')
         spectrum_start = parse2quantity(spectrum_section['start']).to('angstrom', units.spectral())

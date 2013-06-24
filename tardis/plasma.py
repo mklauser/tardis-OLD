@@ -455,7 +455,7 @@ class LTEPlasma(BasePlasma):
         fname = directory + '/' + str(self.zone_id) +'-' +str(self.t_electron) + '-' + hashvalue
 
         try:
-            raise  IOError
+            raise IOError
             self.kappa_bf_gray = np.load(fname+ '-kappa_bf_gray.npy')
             self.kappa_bf_nu = np.load(fname + '-kappa_bf_nu.npy')
             self.kappa_bf = np.load(fname + '-kappa_bf.npy')
@@ -491,22 +491,31 @@ class LTEPlasma(BasePlasma):
         :return:
         """
 
-        __nu_bin_size = 1.9e15
+        __nu_bin_size = 8e12
         self.bf_nu_bin_size = __nu_bin_size
-        nu_bins = np.arange(1e14, 2e16, __nu_bin_size) #TODO: get the binning from the input file.
+        nu_bins = np.arange(7.49e14, 5.49e15, __nu_bin_size) #TODO: get the binning from the input file.
         self.bf_nu_bins = np.array(nu_bins)
 
         phis = self.calculate_saha()
         current_electron_density = self.electron_density
 
+        def calculate_sahafact(gLevel, gNextIonLevel, T, EThreshold ):
+            SAHACONST = 2.0706659e-16
+            return (gLevel/ gNextIonLevel *SAHACONST * T**(-1.5) * np.exp(EThreshold/constants.k_B.cgs.value/T))
+
+
+
         def get_data_from_panda(atomic_number,ion_number,level_number):
-            ion_energy = self.atom_data.ionization_data.ix[atomic_number,ion_number+1].ix['ionization_energy']
+            ion_energy = self.atom_data.ionization_data.ix[atomic_number,ion_number+1].ix['ionization_energy'] -self.atom_data.levels.ix[atomic_number, ion_number, level_number].ix['energy']
             ion_nu = ion_energy/ constants.h.cgs.value
             cx = self.atom_data.ion_cx_th.ix[atomic_number, ion_number, level_number].ix['ion_cx_threshold']
             level_population_next_next_ion = self.level_populations.ix[atomic_number, ion_number + 1, 0]
             phi = phis.ix[atomic_number, ion_number +1]
             current_level_population = self.level_populations.ix[atomic_number, ion_number, level_number]
-            return np.array([ion_energy,ion_nu,cx,current_level_population,level_population_next_next_ion,phi])
+            gLevel = self.atom_data.levels.ix[atomic_number, ion_number, level_number].ix['g']
+            gNextIonLevel = self.atom_data.levels.ix[atomic_number, ion_number + 1, 0].ix['g']
+            saha = calculate_sahafact(gLevel,gNextIonLevel,self.t_electron,ion_energy) # Mihalas p. 48
+            return np.array([ion_energy,ion_nu,cx,current_level_population,level_population_next_next_ion,saha])
 
         levels_record_array = self.atom_data.levels.reset_index().to_records()
         get_data_from_panda_array = np.vectorize(get_data_from_panda,otypes=[np.ndarray])
@@ -520,20 +529,20 @@ class LTEPlasma(BasePlasma):
         expfactor_array = np.exp( - constants.h.cgs.value *nu_bins / self.t_electron / constants.k_B.cgs.value)
 
 
-        nu_edge_mask = (atomic_data_array[:,1,None] > nu_bins[None,:]) # The greater is switch to a smaller to greater
+        nu_edge_mask = (atomic_data_array[:,1,None] > nu_bins[None,:]) # The greater is switched to a smaller to greater
 
-        kappa_bf_ion_atom_mask_array = (atomic_data_array[:,3,None] * atomic_data_array[:,2,None]*(atomic_data_array[:,1,None]/nu_bins[None,None,:])**3 \
-        * (1 - (atomic_data_array[:,3,None]/atomic_data_array[:,4,None]) * atomic_data_array[:,5,None] / self.electron_density )* expfactor_array[None,None,:]).reshape(kappa_bf_array[ion_atom_mask,:].shape)
+        kappa_bf_ion_atom_mask = (atomic_data_array[:,3,None] * atomic_data_array[:,2,None]*(atomic_data_array[:,1,None]/nu_bins[None,None,:])**3 \
+        * (1 - ((atomic_data_array[:,3,None]/atomic_data_array[:,4,None]) * atomic_data_array[:,5,None] / self.electron_density )* expfactor_array[None,None,:])).reshape(kappa_bf_array[ion_atom_mask,:].shape)
 
 
         #disable BF
-        #kappa_bf_ion_atom_mask_array[:,:] = 0
+        #kappa_bf_ion_atom_mask[:,:] = 0
 
         #Set all kappas 0 where nu _edge > nu
 
-        kappa_bf_ion_atom_mask_array[nu_edge_mask] = 0
+        kappa_bf_ion_atom_mask[nu_edge_mask] = 0
 
-        kappa_bf_array[ion_atom_mask,:] =  kappa_bf_ion_atom_mask_array
+        kappa_bf_array[ion_atom_mask,:] =  kappa_bf_ion_atom_mask
         kappa_bf_nu = kappa_bf_array.sum(axis=0)
         kappa_bf_grey = kappa_bf_nu.sum()
         dtypeAtom = levels_record_array.dtype.descr

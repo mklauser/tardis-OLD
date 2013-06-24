@@ -32,7 +32,6 @@ class SimplePacketSource:
         
         wavelength_end : `float`
         upper wl"""
-
         nu_start = units.Unit(wavelength_unit).to('Hz', wavelength_end, units.spectral())
         nu_end = units.Unit(wavelength_unit).to('Hz', wavelength_start, units.spectral())
 

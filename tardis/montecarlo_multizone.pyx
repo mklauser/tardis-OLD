@@ -74,6 +74,7 @@ cdef class StorageModel:
     cdef float_type_t*inverse_electron_density
     cdef np.ndarray line_list_nu_a
     cdef float_type_t*line_list_nu
+    cdef float_type_t[:] line_list_nu_view
     cdef np.ndarray line_lists_tau_sobolevs_a
     cdef float_type_t*line_lists_tau_sobolevs
     cdef int_type_t line_lists_tau_sobolevs_nd
@@ -121,9 +122,19 @@ cdef class StorageModel:
     cdef float_type_t[:] bf_nu_bin_view
     cdef int_type_t bf_nu_bin_size
 
+    cdef float_type_t nu_min
+    cdef float_type_t nu_max
+
 
     cdef float_type_t* t_electron
     cdef np.ndarray t_electron_a
+
+    cdef int_type_t disableBoundFree
+
+    cdef float_type_t black_body_peak
+    cdef float_type_t nu_sampling_lower_lim
+    cdef float_type_t nu_sampling_upper_lim
+
 
 
 
@@ -173,6 +184,8 @@ cdef class StorageModel:
         cdef np.ndarray[float_type_t, ndim=1] line_list_nu = model.line_list_nu
         self.line_list_nu_a = line_list_nu
         self.line_list_nu = <float_type_t*> self.line_list_nu_a.data
+        cdef float_type_t[:] line_list_nu_view = line_list_nu
+        self.line_list_nu_view = line_list_nu_view
         #
         self.no_of_lines = line_list_nu.size
 
@@ -213,13 +226,9 @@ cdef class StorageModel:
         # self.bf_nu_bin_view = bf_nu_bin_view
 
         self.bf_nu_bin_size = len(self.bf_nu_bin)
-        ###Int the array
-
-
-
         size_of_bf_nu_bin = self.no_of_shells * self.bf_nu_bin_size
 
-
+        self.disableBoundFree = model.disableBoundFree
 
 
         #electron temperature
@@ -283,6 +292,56 @@ cdef class StorageModel:
             self.sigma_thomson = model.sigma_thomson
 
         self.inverse_sigma_thomson = 1 / self.sigma_thomson
+
+
+        #constants for the nu sampling
+        cdef float_type_t nuPeak = 5.8789254e10 * self.t_electron[0]
+        cdef float_type_t nu_sampling_c1 = 2. * h_planck / (c**2)
+        cdef float_type_t nu_sampling_c2 = h_planck / boltzmann
+        cdef float_type_t bbPeak
+        cdef int_type_t i = 0
+        cdef float_type_t nu_sampling_lower_lim = self.spectrum_start_nu
+        cdef float_type_t nu_sampling_upper_lim = self.spectrum_end_nu
+        cdef float_type_t t_e = self.t_electron[0]
+
+        print("self.spectrum_start_nu %g self.spectrum_end_nu  %g nuPeak %g"%(self.spectrum_start_nu,self.spectrum_end_nu ,nuPeak))
+        if self.spectrum_start_nu > nuPeak and self.spectrum_end_nu > nuPeak:
+            bbPeak = ((nu_sampling_c1 * self.spectrum_start_nu **3)/(np.exp(nu_sampling_c2*(self.spectrum_start_nu /t_e)) - 1 ))
+            test_bins = 100
+            while i < test_bins:
+                print("left; startnu %g endnu %g"%(self.spectrum_start_nu ,self.spectrum_end_nu ))
+                i += 1
+                interval = (self.spectrum_end_nu - self.spectrum_start_nu)/ test_bins
+                nu_tmp = self.spectrum_start_nu + interval*i
+                bb_tmp = ((nu_sampling_c1 * nu_tmp **3)/(np.exp(nu_sampling_c2*(nu_tmp /t_e)) - 1 ))
+                print("bb_tmp/bbPeak %g"%(bb_tmp /bbPeak))
+                print("nu_tmp %g"%(nu_tmp))
+                if  bb_tmp / bbPeak <0.1:
+                    nu_sampling_upper_lim = nu_tmp
+                    break
+        elif self.spectrum_start_nu < nuPeak and self.spectrum_end_nu < nuPeak:
+            bbPeak = ((nu_sampling_c1 * self.spectrum_end_nu**3)/(np.exp(nu_sampling_c2*(self.spectrum_end_nu /t_e)) - 1 ))
+            test_bins = 10
+            while i < test_bins:
+                print("right")
+                i += 1
+                interval = (self.spectrum_end_nu - self.spectrum_start_nu)/ test_bins
+                nu_tmp = self.spectrum_end_nu - interval*i
+                bb_tmp = ((nu_sampling_c1 * nu_tmp **3)/(np.exp(nu_sampling_c2*(nu_tmp /t_e)) - 1 ))
+                print("bbPeak %g bb_tmp %g"%(bbPeak,bb_tmp))
+                if  bb_tmp /bbPeak < 0.1:
+                    nu_sampling_lower_lim = nu_tmp
+                    break
+        else:
+            # print("mid")
+            bbPeak = ((nu_sampling_c1 * nuPeak**3)/(np.exp(nu_sampling_c2*(nuPeak/t_e)) - 1 ))
+
+        #find cutoff
+
+        self.black_body_peak = bbPeak
+        self.nu_sampling_upper_lim = nu_sampling_upper_lim
+        self.nu_sampling_lower_lim = nu_sampling_lower_lim
+
         #
         #
         #
@@ -311,13 +370,15 @@ cdef float_type_t h_planck = constants.h.cgs.value
 cdef float_type_t boltzmann = constants.k_B.cgs.value
 
 
+
+
 #DEBUG STATEMENT TAKE OUT
 #cdef float_type_t sigma_thomson = 6.652486e-25
 cdef float_type_t sigma_thomson = 6.652486e-125
 cdef float_type_t inverse_sigma_thomson = 1 / sigma_thomson
 
 
-cdef rand_nu_planck(float_type_t t_electron):
+cdef rand_nu_planck(float_type_t t_electron,float_type_t nuStart, float_type_t nuEnd, float_type_t bPeak):
     """
     This function draws a random nu corresponding to the temperature. Using the Neumann rejection sampling.
     :param t_electron: the electron temperature of the plasma
@@ -326,12 +387,23 @@ cdef rand_nu_planck(float_type_t t_electron):
     cdef float_type_t c1 = 2. * h_planck / (c**2)
     cdef float_type_t c2 = h_planck / boltzmann
     cdef float_type_t nuPeak = 5.8789254e10 * t_electron
-    cdef float_type_t  bPeak = ((c1 * nuPeak**3)/(np.exp(c2*(nuPeak/t_electron)) - 1 ))
+    # cdef float_type_t  bPeak #= ((c1 * nuPeak**3)/(np.exp(c2*(nuPeak/t_electron)) - 1 ))
     cdef float_type_t nuRand, bRand
-    cdef float_type_t nuStart, nuEnd, nuInterval
+    #Find the max
+    # if nuStart > nuPeak and nuEnd > nuPeak:
+    #     bPeak = ((c1 * nuStart**3)/(np.exp(c2*(nuStart/t_electron)) - 1 ))
+    #     # print("left")
+    # elif nuStart < nuPeak and nuEnd < nuPeak:
+    #     bPeak = ((c1 * nuEnd**3)/(np.exp(c2*(nuEnd/t_electron)) - 1 ))
+    #     # print("right")
+    # else:
+    #     # print("mid")
+    #     bPeak = ((c1 * nuPeak**3)/(np.exp(c2*(nuPeak/t_electron)) - 1 ))
+    #cdef float_type_t nuStart, nuEnd, nuInterval
     #tmp definition only for debug. Take this values from the config
-    nuStart = 1.4989623e+14
-    nuEnd = 5.9958492e+15
+    #nuStart = 1.4989623e+14
+    #nuEnd = 5.9958492e+15
+    #print("start %g end %g peak %g"%(nuStart,nuEnd,nuPeak ))
     ###
     nuInterval = nuEnd - nuStart
     while True:
@@ -343,18 +415,21 @@ cdef rand_nu_planck(float_type_t t_electron):
     return nuRand
 
 
-cdef float_type_t getGrayKappaBFbyNu(float_type_t nu, float_type_t[:] nu_bins, float_type_t[:,:] kappa_bf_nu_view,int_type_t* current_shell_id):
+cdef float_type_t getGrayKappaBFbyNu(float_type_t nu, float_type_t[:] nu_bins, float_type_t[:,:] kappa_bf_nu_view,int_type_t* current_shell_id, float_type_t disableBoundFree):
     cdef float_type_t kappa_bf_nu = 0
     cdef int_type_t i
-    for i in range(len(nu_bins)-1):
+    if not disableBoundFree:
+        return 0
+    #for i in range(len(nu_bins)-1):
         #print(nu_bins[i],'<',nu,'<',nu_bins[i+1])
-        if ((nu > nu_bins[i]) and (nu <= nu_bins[i+1])):
-            kappa_bf_nu =  kappa_bf_nu_view[current_shell_id[0],i]
-            break
-    #kappa_bf_nu = 0.
-    return kappa_bf_nu
+        # if ((nu > nu_bins[i]) and (nu <= nu_bins[i+1])):
+        #     kappa_bf_nu =  kappa_bf_nu_view[current_shell_id[0],i]
+        #     bla = i
+        #     break
+    ii =  binary_search(nu_bins,nu,0,len(nu_bins))
+    return kappa_bf_nu_view[current_shell_id[0],ii]
 
-cdef int_type_t getNextLineId(float_type_t*nu, float_type_t nu_insert, int_type_t imin,
+cdef int_type_t getNextLineId(float_type_t[:] nu, float_type_t nu_insert, int_type_t imin,
                               int_type_t imax):
     # print('startNextLineId')
     if nu_insert > nu[imin]:
@@ -372,7 +447,7 @@ cdef int_type_t getNextLineId(float_type_t*nu, float_type_t nu_insert, int_type_
         # print("nu_insert %g" %nu_insert)
         return binary_search(nu,nu_insert,imin,imax)
 
-cdef int_type_t binary_search(float_type_t*nu, float_type_t nu_insert, int_type_t imin,
+cdef int_type_t binary_search(float_type_t[:] nu, float_type_t nu_insert, int_type_t imin,
                               int_type_t imax):
     #continually narrow search until just one element remains
     cdef int_type_t imid
@@ -565,13 +640,14 @@ cdef float_type_t compute_distance2continum(float_type_t tau_event,
                                             float_type_t[:] nu_bins_view,
                                             float_type_t ne,
                                             float_type_t sigma_thomson,
-                                            int_type_t* current_shell_id):
+                                            int_type_t* current_shell_id,
+                                            int_type_t disableBoundFree):
 
     cdef float_type_t kappa_cont = 0
     cdef float_type_t kappa_bf_nu = 0
     cdef float_type_t kappa_ff = 0
     cdef float_type_t kappa_th = ne * sigma_thomson
-    kappa_bf_nu = getGrayKappaBFbyNu(nu,nu_bins_view,kappa_bf_nu_view,current_shell_id)
+    kappa_bf_nu = getGrayKappaBFbyNu(nu,nu_bins_view,kappa_bf_nu_view,current_shell_id,disableBoundFree)
     kappa_cont = kappa_bf_nu + kappa_ff + kappa_th
     # print(kappa_cont)
     # print(kappa_bf_nu)
@@ -668,7 +744,7 @@ def montecarlo_radial1d(model, int_type_t virtual_packet_flag=0,int_type_t enabl
         current_energy = current_energy / (1 - (current_mu * current_r * storage.inverse_time_explosion * inverse_c))
 
         #linelists
-        current_line_id = getNextLineId(storage.line_list_nu, comov_current_nu, 0, storage.no_of_lines -1)
+        current_line_id = getNextLineId(storage.line_list_nu_view, comov_current_nu, 0, storage.no_of_lines -1)
 
         #if comov_current_nu > storage.line_list_nu[0]:
         #    current_line_id = 0
@@ -924,7 +1000,8 @@ cdef int_type_t montecarlo_one_packet_loop(StorageModel storage, float_type_t*cu
                                                         storage.bf_nu_bin_view,
                                                         storage.electron_density[current_shell_id[0]],
                                                         storage.sigma_thomson,
-                                                        current_shell_id
+                                                        current_shell_id,
+                                                        storage.disableBoundFree
                                                         )
 
                 #---Disable cont opa.
@@ -1066,7 +1143,7 @@ cdef int_type_t montecarlo_one_packet_loop(StorageModel storage, float_type_t*cu
             #    if ((current_nu[0] <= storage.bf_nu_bins[i]) and (current_nu[0] > storage.bf_nu_bin[i+1])):
             #        kappa_bf_nu = [i]
             #       break
-            kappa_bf = getGrayKappaBFbyNu(current_nu[0], storage.bf_nu_bin_view, storage.kappa_bf_nu_view,current_shell_id)
+            kappa_bf = getGrayKappaBFbyNu(current_nu[0], storage.bf_nu_bin_view, storage.kappa_bf_nu_view,current_shell_id,storage.disableBoundFree)
             kappa_ff = 0#TODO: set kappa ff
             kappa_th = storage.electron_density[current_shell_id[0]] * storage.sigma_thomson
             kappa_cont = kappa_bf + kappa_th + kappa_ff
@@ -1094,7 +1171,7 @@ cdef int_type_t montecarlo_one_packet_loop(StorageModel storage, float_type_t*cu
                 current_energy[0] = comov_energy * inverse_doppler_factor
 
             elif (z > kappa_ff):
-                #print('!-!-!-!-!-!')
+                #print('!Bound-Free at %g, kappa_bf = %g, kappa_th %g '%(current_nu[0],kappa_bf,kappa_th ))
                 #bound-free event
                 #Get new mu
                 doppler_factor = move_packet(current_r, current_mu, current_nu[0], current_energy[0], d_continuum,
@@ -1103,7 +1180,7 @@ cdef int_type_t montecarlo_one_packet_loop(StorageModel storage, float_type_t*cu
                 comov_energy = current_energy[0] * doppler_factor
 
                 current_mu[0] = 2 * rk_double(&mt_state) - 1
-                comov_nu = rand_nu_planck(storage.t_electron[current_shell_id[0]]) #TODO: get the plasma T
+                comov_nu = rand_nu_planck(storage.t_electron[current_shell_id[0]],storage.nu_sampling_lower_lim,storage.nu_sampling_upper_lim,storage.black_body_peak)
 
 
                 inverse_doppler_factor = 1 / (
@@ -1117,7 +1194,7 @@ cdef int_type_t montecarlo_one_packet_loop(StorageModel storage, float_type_t*cu
                 #since we have drawn a new nu we have to erase the line memories of our photon and create a new memories
                 #current_line_id[0] = getNextLineId(storage.line_list_nu, comov_nu, 0, storage.no_of_lines -1)
                 #TODO remove this quick fix
-                i = getNextLineId(storage.line_list_nu, comov_nu, 0, storage.no_of_lines -1)
+                i = getNextLineId(storage.line_list_nu_view, comov_nu, 0, storage.no_of_lines -1)
 #                while storage.line_list_nu[i] > comov_nu:
 #                    print(i)
 #                    i-=1
@@ -1235,7 +1312,7 @@ cdef int_type_t montecarlo_one_packet_loop(StorageModel storage, float_type_t*cu
                 current_shell_id[0] * storage.line_lists_tau_sobolevs_nd + current_line_id[0]]
 
 
-            kappa_bf = getGrayKappaBFbyNu(current_nu[0], storage.bf_nu_bin_view, storage.kappa_bf_nu_view,current_shell_id)
+            kappa_bf = getGrayKappaBFbyNu(current_nu[0], storage.bf_nu_bin_view, storage.kappa_bf_nu_view,current_shell_id,storage.disableBoundFree)
             kappa_ff = 0#TODO: set kappa ff
             kappa_th = storage.electron_density[current_shell_id[0]] * storage.sigma_thomson
             kappa_cont = kappa_bf + kappa_th + kappa_ff
