@@ -181,7 +181,7 @@ cdef class StorageModel:
         self.inverse_electron_density_a = inverse_electron_density
         self.inverse_electron_density = <float_type_t*> self.inverse_electron_density_a.data
         #Line lists
-        cdef np.ndarray[float_type_t, ndim=1] line_list_nu = model.line_list_nu
+        cdef np.ndarray[float_type_t, ndim=1] line_list_nu = model.line_list_nu.values
         self.line_list_nu_a = line_list_nu
         self.line_list_nu = <float_type_t*> self.line_list_nu_a.data
         cdef float_type_t[:] line_list_nu_view = line_list_nu
@@ -390,22 +390,31 @@ cdef rand_nu_planck(float_type_t t_electron,float_type_t nuStart, float_type_t n
     # cdef float_type_t  bPeak #= ((c1 * nuPeak**3)/(np.exp(c2*(nuPeak/t_electron)) - 1 ))
     cdef float_type_t nuRand, bRand
     #Find the max
-    # if nuStart > nuPeak and nuEnd > nuPeak:
-    #     bPeak = ((c1 * nuStart**3)/(np.exp(c2*(nuStart/t_electron)) - 1 ))
-    #     # print("left")
-    # elif nuStart < nuPeak and nuEnd < nuPeak:
-    #     bPeak = ((c1 * nuEnd**3)/(np.exp(c2*(nuEnd/t_electron)) - 1 ))
+    if nuStart > nuPeak and nuEnd > nuPeak:
+        bPeak = ((c1 * nuStart**3)/(np.exp(c2*(nuStart/t_electron)) - 1 ))
+         # print("left")
+    elif nuStart < nuPeak and nuEnd < nuPeak:
+        bPeak = ((c1 * nuEnd**3)/(np.exp(c2*(nuEnd/t_electron)) - 1 ))
     #     # print("right")
-    # else:
+    else:
     #     # print("mid")
-    #     bPeak = ((c1 * nuPeak**3)/(np.exp(c2*(nuPeak/t_electron)) - 1 ))
+        bPeak = ((c1 * nuPeak**3)/(np.exp(c2*(nuPeak/t_electron)) - 1 ))
     #cdef float_type_t nuStart, nuEnd, nuInterval
     #tmp definition only for debug. Take this values from the config
     #nuStart = 1.4989623e+14
     #nuEnd = 5.9958492e+15
-    #print("start %g end %g peak %g"%(nuStart,nuEnd,nuPeak ))
+    # print(bPeak)
+    # print("start %g end %g peak %g"%(nuStart,nuEnd,nuPeak ))
     ###
     nuInterval = nuEnd - nuStart
+    # print(c1)
+    # print(c2)
+    # print(nuPeak)
+    # print("-")
+    # print(nuEnd)
+    # print("----")
+    # print(nuStart)
+    # print("####")
     while True:
         nuRand = rk_double(&mt_state) * nuInterval + nuStart
         bRand = bPeak * rk_double(&mt_state)
@@ -567,7 +576,7 @@ cdef float_type_t move_packet(float_type_t*r,
 cdef void increment_j_blue_estimator(int_type_t*current_line_id, float_type_t*current_nu, float_type_t*current_energy,
                                      float_type_t*mu, float_type_t*r, float_type_t d_line, int_type_t j_blue_idx,
                                      StorageModel storage):
-    cdef float_type_t comov_energy, r_interaction, mu_interaction, distance, doppler_factor
+    cdef float_type_t comov_energy, comov_nu, r_interaction, mu_interaction, distance, doppler_factor
 
     distance = d_line
 
@@ -577,6 +586,8 @@ cdef void increment_j_blue_estimator(int_type_t*current_line_id, float_type_t*cu
     doppler_factor = (1 - (mu_interaction * r_interaction * storage.inverse_time_explosion * inverse_c))
 
     comov_energy = current_energy[0] * doppler_factor
+    comov_nu = current_nu[0] * doppler_factor
+
     storage.line_lists_j_blues[j_blue_idx] += (comov_energy / current_nu[0])
     #print "incrementing j_blues = %g" % storage.line_lists_j_blues[j_blue_idx]
 
@@ -623,7 +634,6 @@ cdef float_type_t compute_distance2line(float_type_t r, float_type_t mu,
             print "doppler_factor", doppler_factor
             print "cur_zone_id", cur_zone_id
             return miss_distance
-
 
     return ((comov_nu - nu_line) / nu) * c * t_exp
 
@@ -745,22 +755,6 @@ def montecarlo_radial1d(model, int_type_t virtual_packet_flag=0,int_type_t enabl
 
         #linelists
         current_line_id = getNextLineId(storage.line_list_nu_view, comov_current_nu, 0, storage.no_of_lines -1)
-
-        #if comov_current_nu > storage.line_list_nu[0]:
-        #    current_line_id = 0
-        #    last_line = 0
-        #elif comov_current_nu > storage.line_list_nu[storage.no_of_lines -1]:
-        #    current_line_id = binary_search(storage.line_list_nu, comov_current_nu, 0, storage.no_of_lines)
-        #    last_line = 0
-        #else:
-        #    #setting flag that the packet is off the red end of the line list
-        #    last_line =1
-        ###DEBUG####
-        # print("current_nu = %g" %current_nu)
-        # print("current_line_id = %d"%current_line_id)
-        # print("current_nu_line = %g"%storage.line_list_nu[current_line_id])
-        # print("no of lines: %d"% storage.no_of_lines)
-
 
         if current_line_id == storage.no_of_lines:
             #setting flag that the packet is off the red end of the line list
@@ -891,6 +885,12 @@ cdef int_type_t montecarlo_one_packet(StorageModel storage, float_type_t*current
 
 #
 #
+cdef int_type_t montecarlo_one_typed_packet_loop(StorageModel storage, float_type_t*current_nu, float_type_t*current_energy,
+                                           float_type_t*current_mu, int_type_t*current_shell_id, float_type_t*current_r,
+                                           int_type_t*current_line_id, int_type_t*last_line, int_type_t*close_line,
+                                           int_type_t*recently_crossed_boundary, int_type_t virtual_packet_flag,
+                                           int_type_t virtual_packet, int_type_t enable_bf,int_type_t )
+
 cdef int_type_t montecarlo_one_packet_loop(StorageModel storage, float_type_t*current_nu, float_type_t*current_energy,
                                            float_type_t*current_mu, int_type_t*current_shell_id, float_type_t*current_r,
                                            int_type_t*current_line_id, int_type_t*last_line, int_type_t*close_line,
