@@ -672,7 +672,7 @@ cdef float_type_t compute_distance2line(float_type_t r, float_type_t mu,
             print "nu", nu
             print "doppler_factor", doppler_factor
             print "cur_zone_id", cur_zone_id
-            a = input()
+          #  a = input()
             return miss_distance
 
     return ((comov_nu - nu_line) / nu) * c * t_exp
@@ -803,12 +803,14 @@ def montecarlo_radial1d(model, int_type_t virtual_packet_flag=0,int_type_t enabl
         #Do it real
         reabsorbed = montecarlo_one_packet(storage, &packet,enable_bf)
 
-        if reabsorbed == 1: #reabsorbed
+        if packet.type == 98: #reabsorbed
             output_nus[i] = -packet.current_nu
             output_energies[i] = -packet.current_energy
-        elif reabsorbed == 0: #emitted
+        elif packet.type == 99: #emitted
             output_nus[i] = packet.current_nu
             output_energies[i] = packet.current_energy
+        else:
+            print("we lost the trak of one packet ")
 
     return output_nus, output_energies, storage.js_a, storage.nubars_a
 
@@ -1194,8 +1196,8 @@ cdef int_type_t do_r_packet(StorageModel storage, Packet_struct*packet, int_type
     cdef Packet_struct virtual_sub_packet
 
     #Initializing tau_event if it's a real packet
-    if (packet.type == 1):
-        packet.tau_event = -log(rk_double(&mt_state))
+    #if (packet.type == 1):
+    #    packet.tau_event = -log(rk_double(&mt_state))
 
     #For a virtual packet tau_event is the sum of all the tau's that the packet passes.
 
@@ -1566,7 +1568,7 @@ cdef int_type_t do_r_packet(StorageModel storage, Packet_struct*packet, int_type
     elif (d_line <= d_outer) and (d_line <= d_inner) and (d_line <= d_continuum):
     #Line scattering
         #It has a chance to hit the line
-        if (packet.type > 10) and (packet.type < 20):
+        if (packet.type > 10) and (packet.type < 20): #TODO check if this is ok
             j_blue_idx = packet.current_shell_id * storage.line_lists_j_blues_nd + packet.current_line_id
             increment_j_blue_estimator(storage,packet,d_line,j_blue_idx)
 
@@ -1579,10 +1581,10 @@ cdef int_type_t do_r_packet(StorageModel storage, Packet_struct*packet, int_type
         kappa_th = storage.electron_density[packet.current_shell_id] * storage.sigma_thomson
         kappa_cont = kappa_bf + kappa_th + kappa_ff
         #print("line scatter: kappa_cont = %g"%kappa_cont)
-
+        #the kappa_th contains the tau_electron
         tau_continuum = kappa_cont * d_line
         ##The tau electron is disabled for debugging
-        tau_electron = storage.sigma_thomson * storage.electron_density[packet.current_shell_id] * d_line
+        #tau_electron = storage.sigma_thomson * storage.electron_density[packet.current_shell_id] * d_line
         #tau_electron = 0
         tau_combined = tau_line + tau_continuum
         #            tau_combined = tau_line + tau_electron
@@ -1636,14 +1638,37 @@ cdef int_type_t do_r_packet(StorageModel storage, Packet_struct*packet, int_type
             if packet.tau_event < tau_combined:
 
             #A line interaction trigers a i packet
-                print("set packet type to 3")
-                packet.distance_to_move =d_line
-                packet.type = 3 # 3 I-Packet
-                reabsorbed = 0
+
+
+                old_doppler_factor = move_packet(storage,packet,d_line)
+                packet.current_mu =  2 * rk_double(&mt_state) - 1
+                inverse_doppler_factor = 1/(
+                    1- (packet.current_mu * packet.current_r * storage.inverse_time_explosion * inverse_c)
+                )
+
+                comov_nu = packet.current_nu * old_doppler_factor
+                comov_energy = packet.current_energy * old_doppler_factor
+
+                packet.current_energy = comov_energy * inverse_doppler_factor
+
+                if storage.line_interaction_id ==0: #scatter
+                    emission_line_id = packet.current_line_id -1
+                    packet.current_nu = storage.line_list_nu[emission_line_id] * inverse_doppler_factor
+                    nu_line = storage.line_list_nu[emission_line_id]
+                    packet.current_line_id = emission_line_id + 1
+                elif storage.line_interaction_id >= 1:# downbranch & macro
+                    print("set packet type to 3")
+                    packet.distance_to_move =d_line
+                    packet.type = 3 # 3 I-Packet
+                    reabsorbed = 0
+                    return  reabsorbed
+
                 IF packet_logging == True:
                     packet_logger.debug('Line interaction over. New Line %d (nu=%s; rest)', emission_line_id + 1,
                                         storage.line_list_nu[emission_line_id])
-                return  reabsorbed
+
+                packet.tau_event = -log(rk_double(&mt_state))
+                packet.recently_crossed_boundary = 0
 
             else: #tau_event > tau_line no interaction so far
                 #reducing event tau to take this probability into account
@@ -1695,6 +1720,7 @@ cdef do_i_packet(StorageModel storage, Packet_struct* packet,enable_bf):
 
     ##FOR_DEBUG:
     print("Do i-packet")
+    print("i do line nr. %d"%packet.current_line_id)
     ##
 
 
@@ -1713,15 +1739,14 @@ cdef do_i_packet(StorageModel storage, Packet_struct* packet,enable_bf):
         print "/BEGIN//////WARNING comoving nu less than nu_line shouldn't happen:"
         print "comov_nu = ", comov_nu
         print "nu_line", storage.line_list_nu[packet.current_line_id-1]
+        print "current line list id", packet.current_line_id
+        print "last line list id", storage.no_of_lines
 
 
 
-    if storage.line_interaction_id == 0: #scatter
-        emission_line_id = packet.current_line_id - 1
-    elif storage.line_interaction_id >= 1:# downbranch & macro
         #here comes the macro atom
-        activate_level_id = storage.line2macro_level_upper[packet.current_line_id - 1]
-        emission_line_id = macro_atom(storage,packet,activate_level_id)
+    activate_level_id = storage.line2macro_level_upper[packet.current_line_id - 1]
+    emission_line_id = macro_atom(storage,packet,activate_level_id)
 
 
     packet.current_nu = storage.line_list_nu[emission_line_id] * inverse_doppler_factor
